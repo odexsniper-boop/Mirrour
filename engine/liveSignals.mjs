@@ -1,0 +1,274 @@
+/**
+ * Live Signals service — SIGNALS ONLY by default.
+ *
+ * Keeps the wallet watcher's watch list in sync with your Solana follows (plus any wallets
+ * you add manually), and for every real swap it detects:
+ *   1. asks the engine, in dry-run mode, "would my settings copy this?" (nothing executes)
+ *   2. stores the signal + decision for the terminal's Live Signals tab
+ *   3. optionally (paperCopy ON + Paper Trading ON) feeds it to the PAPER engine,
+ *      so paper positions use real tokens and live DexScreener prices.
+ * It never sends a real transaction.
+ */
+import { SolanaWalletWatcher, TokenInfoService, isSolanaAddress, DEFAULT_SOLANA_RPC } from './walletWatcher.mjs';
+import { redact } from './env.mjs';
+
+const MAX_SIGNALS = 200;
+
+export function pickCurrentPrice(sig) {
+  const fill = Number(sig.txPriceUsd) || null;
+  const market = Number(sig.currentPriceUsd) || null;
+  if (sig.side === 'sell') return fill || market;
+  if (!market) return fill;
+  if (!fill) return market;
+  const r = market / fill;
+  return r <= 3 && r >= 1 / 3 ? market : fill;
+}
+
+export class LiveSignalService {
+  constructor({ engine, watcher = null, broadcast = () => {}, env = process.env, alchemy = null } = {}) {
+    this.engine = engine;
+    this.broadcast = broadcast;
+    this.alchemy = alchemy;
+    this.signals = [];
+    // RPC priority: SOLANA_RPC_URL env → Alchemy (if ALCHEMY_API_KEY set) → public mainnet RPC
+    const defaultRpc = env.SOLANA_RPC_URL || alchemy?.solanaRpcUrl() || DEFAULT_SOLANA_RPC;
+    this.config = {
+      enabled: env.ODEX_LIVE_WATCH !== '0',
+      rpcUrl: defaultRpc,
+      pollSec: Number(env.ODEX_WATCH_POLL_SEC || 1), // backup check every second (the live stream is instant)
+      // Copy followed wallets automatically (paper). Turn off to only watch signals.
+      paperCopy: true,
+      // Real-time push (WebSocket) on top of polling: trades arrive ~1 s after they land
+      realtime: env.ODEX_STREAM !== '0',
+      manual: [], // [{ address, label }]
+    };
+    this.watcher =
+      watcher ||
+      new SolanaWalletWatcher({
+        rpcUrl: this.config.rpcUrl,
+        pollIntervalMs: this.config.pollSec * 1000,
+        tokenInfo: new TokenInfoService({ metadata: alchemy }),
+        stream: this.config.realtime,
+        redactUrl: (x) => redact(x, alchemy?.apiKey),
+      });
+    this.watcher.onSignal = (s) => this.handleSignal(s);
+    this.watcher.onStatus = () => this.pushStatus();
+    this.lastStatusPush = 0;
+    this.statusTimer = null;
+  }
+
+  /** Wallets to watch: Solana follows + manual entries, de-duplicated. */
+  watchList() {
+    const map = new Map();
+    for (const f of this.engine.follows) {
+      if (f.chainId !== 'solana' || !isSolanaAddress(f.traderWallet)) continue;
+      if (!map.has(f.traderWallet)) map.set(f.traderWallet, { address: f.traderWallet, label: `@${f.handle}`, source: 'follow' });
+    }
+    for (const m of this.config.manual) {
+      if (!map.has(m.address)) map.set(m.address, { address: m.address, label: m.label || null, source: 'manual' });
+    }
+    return [...map.values()];
+  }
+
+  sync() {
+    this.watcher.setWallets(this.watchList());
+    const shouldRun = this.config.enabled && this.watcher.wallets.size > 0;
+    if (shouldRun && !this.watcher.running) this.watcher.start();
+    if (!shouldRun && this.watcher.running) this.watcher.stop();
+    this.pushStatus(true);
+  }
+
+  isActive() {
+    return this.config.enabled && this.watcher.running && this.watcher.wallets.size > 0;
+  }
+
+  updateConfig(patch = {}) {
+    if (patch.enabled !== undefined) this.config.enabled = Boolean(patch.enabled);
+    if (patch.paperCopy !== undefined) {
+      this.config.paperCopy = Boolean(patch.paperCopy);
+      this.config.paperCopyChosen = true;
+    }
+    if (patch.realtime !== undefined) {
+      this.config.realtime = Boolean(patch.realtime);
+      this.watcher.setStreamEnabled(this.config.realtime);
+    }
+    if (patch.pollSec !== undefined) {
+      this.config.pollSec = Math.min(300, Math.max(1, Number(patch.pollSec) || 1));
+      this.watcher.setPollInterval(this.config.pollSec * 1000);
+    }
+    if (patch.rpcUrl !== undefined) {
+      let url = String(patch.rpcUrl || '').trim();
+      // The browser only ever sees a masked URL; saving it unchanged keeps the current one
+      if (url.includes('…') || url === this.maskedRpcUrl()) return this.sync();
+      if (!url || url.toLowerCase() === 'alchemy') url = this.alchemy?.solanaRpcUrl() || DEFAULT_SOLANA_RPC;
+      if (!/^https?:\/\//i.test(url)) throw new Error('RPC URL must start with http:// or https://');
+      this.config.rpcUrl = url;
+      this.watcher.setRpcUrl(url);
+    }
+    this.sync();
+  }
+
+  addManual(address, label) {
+    const addr = String(address || '').trim();
+    if (!isSolanaAddress(addr)) throw new Error('Enter a valid Solana wallet address (32–44 base58 characters).');
+    if (!this.config.manual.some((m) => m.address === addr)) {
+      this.config.manual.push({ address: addr, label: String(label || '').trim().slice(0, 32) || null });
+    }
+    this.sync();
+  }
+
+  removeManual(address) {
+    this.config.manual = this.config.manual.filter((m) => m.address !== address);
+    this.sync();
+  }
+
+  purgeFake() {
+    const before = this.signals.length;
+    this.signals = this.signals.filter((x) => Number(x?.usdValue) >= 1 && !(x.source === 'balances' && String(x.signature || '').startsWith('bal-')));
+    this.pushStatus(true);
+    return before - this.signals.length;
+  }
+
+  clear() {
+    this.signals = [];
+    this.pushStatus(true);
+  }
+
+  /** Map a watcher signal to the engine's signal shape for one follow. */
+  toEngineSignal(sig, follow) {
+    const isLaunchpad = sig.dexId === 'pumpfun' || /pump$/i.test(sig.tokenMint);
+    return {
+      chainId: 'solana',
+      side: sig.side,
+      sellSharePct: sig.side === 'sell' ? (Number(sig.sellSharePct) > 0 ? Number(sig.sellSharePct) : 100) : undefined,
+      traderHandle: follow ? follow.handle : sig.label || sig.wallet,
+      traderWallet: sig.wallet,
+      signature: sig.signature,
+      ageSec: sig.blockTime ? Math.max(0, (Date.now() - sig.blockTime) / 1000) : undefined,
+      traderBuyUsd: sig.usdValue,
+      traderBuyNative: sig.quoteSymbol === 'SOL' ? sig.quoteAmount : undefined,
+      live: true,
+      token: {
+        address: sig.tokenMint,
+        symbol: sig.symbol,
+        name: sig.name || sig.symbol,
+        isLaunchpad,
+        stage: sig.dexId === 'pumpfun' ? 'pre-grad' : 'graduated',
+        marketCapUsd: sig.marketCapUsd,
+        liquidityUsd: sig.liquidityUsd,
+        traderFillPriceUsd: sig.txPriceUsd,
+        // Market price for the chase check, unless it disagrees wildly with the trader's real
+        // fill (data feeds misprice some new launches). Sells fill at the trader's own price.
+        currentPriceUsd: pickCurrentPrice(sig),
+        imageUrl: sig.imageUrl || null,
+        createdAt: sig.pairCreatedAt || null,
+        // Freeze / mint authority come from Alchemy token metadata when available
+        safety: sig.authorityKnown
+          ? { safetyVerified: true, freezeAuthority: Boolean(sig.freezeAuthority), mintAuthority: Boolean(sig.mintAuthority) }
+          : { safetyVerified: true },
+      },
+    };
+  }
+
+  async decide(sig) {
+    const follows = this.engine.follows.filter((f) => f.chainId === 'solana' && f.traderWallet === sig.wallet);
+    if (!follows.length) return [{ followId: null, handle: sig.label, status: 'watch_only', reason: 'watched manually, not followed' }];
+    const out = [];
+    for (const f of follows) {
+      const es = this.toEngineSignal(sig, f);
+      try {
+        const r =
+          sig.side === 'buy'
+            ? await this.engine.handleLeaderBuySignal(f, es, { dryRun: true })
+            : await this.engine.handleLeaderSellSignal(f, es, { dryRun: true });
+        out.push({
+          followId: f.id,
+          handle: f.handle,
+          followStatus: f.status,
+          status: r.status,
+          reason: r.reason || null,
+          sizeUsd: r.sizeUsd ?? null,
+          chaseGapPct: r.chaseGapPct ?? null,
+        });
+      } catch (err) {
+        out.push({ followId: f.id, handle: f.handle, status: 'error', reason: err.message });
+      }
+    }
+    return out;
+  }
+
+  async handleSignal(sig) {
+    if (this.signals.some((s) => s.signature === sig.signature)) return;
+    // dust (under $1) is never a real copy-worthy trade; keep it out of the feed
+    if (!(Number(sig.usdValue) >= 1)) return;
+    const record = { ...sig, decisions: await this.decide(sig), paperCopied: false };
+
+    // Every live fill from a watched wallet is a real price for that token
+    if (!sig.backfill && typeof this.engine.observeTradePrice === 'function') {
+      this.engine.observeTradePrice(sig.tokenMint, sig.txPriceUsd, sig.blockTime || Date.now());
+    }
+
+    // Copies run on paper (Paper Trading ON) or for real (Paper Trading OFF + bot wallet key set)
+    const copying = this.engine.settings.paperTrading || (typeof this.engine.realTradingActive === 'function' && this.engine.realTradingActive());
+    if (this.config.paperCopy && copying && !sig.backfill) {
+      // Each follow is matched by WALLET only and copies with its own settings
+      const follows = this.engine.follows.filter((f) => f.chainId === 'solana' && f.traderWallet === sig.wallet);
+      record.copies = [];
+      for (const f of follows) {
+        const es = this.toEngineSignal(sig, f);
+        let r;
+        try {
+          r = sig.side === 'buy' ? await this.engine.handleLeaderBuySignal(f, es) : await this.engine.handleLeaderSellSignal(f, es);
+        } catch (err) {
+          r = { status: 'error', reason: err.message };
+        }
+        const ok = r?.status === 'filled' || r?.ok === true;
+        record.copies.push({ followId: f.id, handle: f.handle, ok, status: r?.status || null, reason: r?.reason || null });
+      }
+      record.paperCopied = record.copies.some((c) => c.ok);
+    }
+
+    this.signals.unshift(record);
+    if (this.signals.length > MAX_SIGNALS) this.signals.length = MAX_SIGNALS;
+    this.broadcast({ event: 'live_signal', data: record, liveWatch: this.snapshot(false) });
+  }
+
+  pushStatus(force = false) {
+    const now = Date.now();
+    if (!force && now - this.lastStatusPush < 1000) {
+      if (!this.statusTimer) {
+        this.statusTimer = setTimeout(() => {
+          this.statusTimer = null;
+          this.pushStatus(true);
+        }, 1000);
+      }
+      return;
+    }
+    this.lastStatusPush = now;
+    this.broadcast({ event: 'watcher_status', liveWatch: this.snapshot(false) });
+  }
+
+  maskedRpcUrl() {
+    return this.alchemy ? this.alchemy.maskUrl(this.config.rpcUrl) : this.config.rpcUrl;
+  }
+
+  rpcProvider() {
+    const u = this.config.rpcUrl || '';
+    if (this.alchemy?.enabled && u.includes(this.alchemy.apiKey)) return 'alchemy';
+    if (u === DEFAULT_SOLANA_RPC) return 'public';
+    return 'custom';
+  }
+
+  snapshot(includeSignals = true) {
+    const status = this.watcher.getStatus();
+    const key = this.alchemy?.apiKey;
+    return {
+      mode: 'signals-only',
+      config: { ...this.config, rpcUrl: this.maskedRpcUrl(), rpcProvider: this.rpcProvider(), manual: [...this.config.manual] },
+      status: { ...status, rpcUrl: redact(status.rpcUrl, key), lastError: status.lastError ? redact(status.lastError, key) : null },
+      alchemy: this.alchemy ? this.alchemy.status() : { configured: false },
+      watchList: this.watchList(),
+      ...(includeSignals ? { signals: this.signals } : {}),
+    };
+  }
+}

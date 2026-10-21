@@ -1,0 +1,1311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>odex mirror — Real-time Copy Trading</title>
+  <meta name="theme-color" content="#060813" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="icon" type="image/png" sizes="64x64" href="/favicon-64.png" />
+  <link rel="icon" href="/favicon.ico" sizes="any" />
+  <link rel="apple-touch-icon" href="/favicon-180.png" />
+  <link rel="preload" href="/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body class="logged-out">
+  <!-- LOGIN (development: Continue opens the terminal; Google / Apple sign-in are not connected yet) -->
+  <div id="login-screen" class="login-screen" role="dialog" aria-modal="true" aria-labelledby="login-title">
+    <div class="login-card">
+      <button type="button" class="login-close" onclick="document.getElementById('login-input').value=''; loginContinue();" aria-label="Close" title="Close (development: opens the terminal)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      <h1 id="login-title">Log in or sign up</h1>
+      <p class="login-sub">Copy real Solana traders as paper trades, with your own exit rules.</p>
+      <button type="button" class="login-btn" onclick="loginProvider('Google')"><img src="/icons/google.png" alt="" width="19" height="18" />Continue with Google</button>
+      <button type="button" class="login-btn" onclick="loginProvider('Apple')"><img src="/icons/apple.png" alt="" width="14" height="16" />Continue with Apple</button>
+      <button type="button" class="login-btn" onclick="loginPinMode()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2" width="12" height="20" rx="2.5"/><line x1="11" y1="18" x2="13" y2="18"/></svg>Continue with 10-Digit PIN</button>
+      <div class="login-or"><span>or</span></div>
+      <form onsubmit="event.preventDefault(); loginContinue();" novalidate>
+        <input id="login-input" class="login-input" type="text" autocomplete="email" placeholder="Email address or 10-digit PIN" aria-label="Email address or 10-digit PIN" />
+        <div class="login-msg" id="login-msg" role="status"></div>
+        <button type="submit" class="login-continue">Continue</button>
+      </form>
+      <p class="login-dev">Development build: sign-in isn't verified yet. Continue opens the terminal on this computer.</p>
+    </div>
+  </div>
+
+  <!-- Shared SVG sprite: official Solana logomark + chain marks (kept rendered at 0x0 so gradients resolve) -->
+  <svg class="svg-sprite" aria-hidden="true" focusable="false">
+    <defs>
+      <linearGradient id="sol-grad" x1="20" y1="320" x2="380" y2="-10" gradientUnits="userSpaceOnUse">
+        <stop offset="0" stop-color="#9945FF" />
+        <stop offset="0.55" stop-color="#5497D5" />
+        <stop offset="1" stop-color="#14F195" />
+      </linearGradient>
+      <symbol id="sol-mark" viewBox="0 0 397.7 311.7">
+        <path fill="url(#sol-grad)" d="M64.6 237.9c2.4-2.4 5.7-3.8 9.2-3.8h317.4c5.8 0 8.7 7 4.6 11.1l-62.7 62.7c-2.4 2.4-5.7 3.8-9.2 3.8H6.5c-5.8 0-8.7-7-4.6-11.1l62.7-62.7z"/>
+        <path fill="url(#sol-grad)" d="M64.6 3.8C67.1 1.4 70.4 0 73.8 0h317.4c5.8 0 8.7 7 4.6 11.1l-62.7 62.7c-2.4 2.4-5.7 3.8-9.2 3.8H6.5c-5.8 0-8.7-7-4.6-11.1L64.6 3.8z"/>
+        <path fill="url(#sol-grad)" d="M333.1 120.1c-2.4-2.4-5.7-3.8-9.2-3.8H6.5c-5.8 0-8.7 7-4.6 11.1l62.7 62.7c2.4 2.4 5.7 3.8 9.2 3.8h317.4c5.8 0 8.7-7 4.6-11.1l-62.7-62.7z"/>
+      </symbol>
+      <symbol id="bnb-mark" viewBox="0 0 24 24">
+        <path fill="#F3BA2F" d="M12 3.2l2.6 2.6L9.9 10.5 7.3 7.9 12 3.2zm4.1 4.1l2.6 2.6-6.7 6.7-2.6-2.6 6.7-6.7zM5.3 9.9l2.6 2.6-2.6 2.6L2.7 12.5l2.6-2.6zm13.4 0l2.6 2.6-2.6 2.6-2.6-2.6 2.6-2.6zM12 16.6l2.6 2.6L12 21.8l-2.6-2.6 2.6-2.6z"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <!-- Top Navigation Bar -->
+  <header class="topbar">
+    <div class="brand-wrapper">
+      <img class="brand-logo" src="/logo.png" alt="odex mirror" />
+    </div>
+
+    <!-- Global search -->
+    <div class="global-search" id="global-search" role="search">
+      <svg class="gs-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="search" id="global-search-input" class="gs-input" placeholder="Search traders, tokens, wallets or pages…" autocomplete="off" spellcheck="false" aria-label="Search" aria-expanded="false" aria-controls="global-search-results" />
+      <kbd class="gs-kbd" aria-hidden="true">/</kbd>
+      <div class="gs-results" id="global-search-results" role="listbox"></div>
+    </div>
+
+
+    <!-- Topbar Right (Exact Screenshot: Deposit, Wallet Balances, Profile) -->
+    <div class="topbar-right">
+      <div class="header-notif-wrapper">
+        <button class="header-notif-btn" id="header-notif-btn" onclick="toggleNotifDropdown(event)" title="Notifications" aria-label="Notifications" aria-haspopup="true" aria-expanded="false">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+          <span class="notif-badge" id="notif-badge" hidden>0</span>
+        </button>
+        <div class="notif-dropdown" id="notif-dropdown" role="dialog" aria-label="Notifications">
+          <div class="notif-head">
+            <strong>Notifications</strong>
+            <button type="button" class="notif-readall" onclick="markNotifsRead()">Mark all read</button>
+          </div>
+          <div class="notif-filters" id="notif-filters">
+            <button type="button" class="notif-filter active" data-f="all" onclick="setNotifFilter('all')">All</button>
+            <button type="button" class="notif-filter" data-f="trades" onclick="setNotifFilter('trades')">Trades</button>
+            <button type="button" class="notif-filter" data-f="problems" onclick="setNotifFilter('problems')">Problems</button>
+          </div>
+          <div class="notif-list" id="notif-list"></div>
+        </div>
+      </div>
+      <div class="header-wallet-pill-wrapper">
+        <button class="header-wallet-pill" onclick="toggleHeaderWalletDropdown()" title="Solana Wallet Balance">
+          <svg class="header-wallet-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 12V8H6a2 2 0 0 1-2-2c0-1.1.9-2 2-2h12v4"/><path d="M4 6v12c0 1.1.9 2 2 2h14v-4"/><path d="M18 12a2 2 0 0 0-2 2c0 1.1.9 2 2 2h4v-4h-4z"/>
+          </svg>
+          <span class="header-vdiv"></span>
+          <div class="header-bal-group">
+            <svg class="header-sol-logo" aria-hidden="true"><use href="#sol-mark"/></svg>
+            <span id="header-sol-balance" class="header-bal-val">0.00 SOL</span>
+            <svg class="header-chevron" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </div>
+        </button>
+
+        <!-- Dropdown on clicking wallet pill -->
+        <div id="header-wallet-dropdown" class="header-wallet-dropdown">
+          <div class="hwd-card">
+            <svg class="hwd-watermark" viewBox="0 0 397.7 311.7" aria-hidden="true"><use href="#sol-mark"/></svg>
+            <div class="hwd-top">
+              <span class="sw-logo hwd-logo"><svg viewBox="0 0 397.7 311.7" aria-hidden="true"><use href="#sol-mark"/></svg></span>
+              <div class="hwd-id">
+                <div class="hwd-title" id="hwd-wallet-name">Solana Wallet</div>
+                <div class="sw-addr hwd-addr">
+                  <span id="hwd-wallet-addr">Created on first deposit</span>
+                  <button class="sw-copy" id="hwd-copy" onclick="copyActiveWalletAddress()" title="Copy address" aria-label="Copy address"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+                </div>
+              </div>
+              <span class="sw-head-status hwd-status"><span class="dot"></span>Active</span>
+            </div>
+            <div class="hwd-bal">
+              <div><strong class="mono" id="hwd-usdc-bal">0.00</strong> <span>USDC</span></div>
+              <div class="sw-usd mono" id="hwd-sol-bal">≈ $0.00</div>
+            </div>
+          </div>
+          <div class="hwd-balances">
+            <div class="hwd-bal-row" id="hwd-phantom"></div>
+          </div>
+          <div class="hwd-actions">
+            <button class="btn btn-primary hwd-deposit" onclick="toggleHeaderWalletDropdown(); openDepositModal()" title="Deposit SOL"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>Deposit</button>
+          </div>
+          <button class="hwd-manage" onclick="goTerminalTab('wallets'); toggleHeaderWalletDropdown();">Manage wallet ›</button>
+        </div>
+      </div>
+
+      <button class="header-user-btn" onclick="openUserProfileModal()" title="Profile &amp; settings" aria-label="Open settings">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+          <circle cx="12" cy="7" r="4"/>
+        </svg>
+      </button>
+    </div>
+  </header>
+
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar" aria-label="Main menu">
+      <nav class="main-nav side-nav" aria-label="Main Navigation">
+      <button class="nav-tab active" data-view="terminal" onclick="switchMainView('terminal')" title="Home">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 10.5 12 3l9 7.5"/><path d="M5 9.5V20a1 1 0 0 0 1 1h4v-6h4v6h4a1 1 0 0 0 1-1V9.5"/></svg>
+        <span>Home</span>
+      </button>
+      <button class="nav-tab" data-panel="wallets" onclick="goTerminalTab('wallets')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12V8H6a2 2 0 0 1-2-2c0-1.1.9-2 2-2h12v4"/><path d="M4 6v12c0 1.1.9 2 2 2h14v-4"/><path d="M18 12a2 2 0 0 0-2 2c0 1.1.9 2 2 2h4v-4h-4z"/></svg>
+        <span>Wallets</span>
+      </button>
+      <button class="nav-tab" data-panel="history" onclick="goTerminalTab('history')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <span>History</span>
+      </button>
+      <button class="nav-tab" data-view="docs" onclick="switchMainView('docs')">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14z"/><path d="M20 17v4H6.5A2.5 2.5 0 0 1 4 19.5"/></svg>
+        <span>Docs</span>
+      </button>
+      <button class="nav-tab" data-panel="config" onclick="goTerminalTab('config')" title="Settings">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        <span>Settings</span>
+      </button>
+    </nav>
+    </aside>
+
+  <main class="app-container">
+    <!-- ===================================================================== -->
+    <!-- VIEW 1: LIVE WEB COPY-TRADING TERMINAL                                -->
+    <!-- ===================================================================== -->
+    <section id="view-terminal" class="page-view active">
+      <!-- 5 KPI Overview Cards -->
+      <div class="kpi-grid">
+        <div class="kpi-card" onclick="goTerminalTab('wallets')" style="cursor:pointer;" title="Open Wallets">
+          <div class="kpi-header">
+            <div class="kpi-icon-box icon-wallet">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12V8H6a2 2 0 0 1-2-2c0-1.1.9-2 2-2h12v4"/><path d="M4 6v12c0 1.1.9 2 2 2h14v-4"/><path d="M18 12a2 2 0 0 0-2 2c0 1.1.9 2 2 2h4v-4h-4z"/></svg>
+            </div>
+            <div class="kpi-title-block">
+              <div class="kpi-label">Total portfolio balance</div>
+            </div>
+            <svg class="kpi-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          </div>
+          <div class="kpi-value" id="kpi-total-balance">$0.00</div>
+          <div class="kpi-sub" id="kpi-active-wallet-sub">Active: Main ($0.00 cash)</div>
+        </div>
+
+        <div class="kpi-card" onclick="goTerminalTab('positions')" style="cursor:pointer;" title="Open Positions">
+          <div class="kpi-header">
+            <div class="kpi-icon-box icon-open">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+            </div>
+            <div class="kpi-title-block">
+              <div class="kpi-label">Open positions value</div>
+            </div>
+            <svg class="kpi-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          </div>
+          <div class="kpi-value" id="kpi-open-value">$0.00</div>
+          <div class="kpi-sub" id="kpi-open-count">0 open positions (Cost: $0.00)</div>
+        </div>
+
+        <div class="kpi-card" onclick="goTerminalTab('positions')" style="cursor:pointer;" title="Open Positions">
+          <div class="kpi-header">
+            <div class="kpi-icon-box icon-pnl">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 15l-6-6-6 6"/></svg>
+            </div>
+            <div class="kpi-title-block">
+              <div class="kpi-label" id="kpi-pnl-label">Unrealized PnL</div>
+            </div>
+            <div class="kpi-unit" role="group" aria-label="Show PnL in" onclick="event.stopPropagation()">
+              <button type="button" data-unit="usd" onclick="setPnlUnit('usd')">USD</button><button type="button" data-unit="sol" onclick="setPnlUnit('sol')">SOL</button>
+            </div>
+            <svg class="kpi-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          </div>
+          <div class="kpi-value pos-up" id="kpi-unrealized-pnl" title="Click to switch USD / SOL" onclick="event.stopPropagation(); setPnlUnit(pnlUnit === 'usd' ? 'sol' : 'usd')" style="cursor:pointer">+$0.00 <span class="kpi-pct">(+0.0%)</span></div>
+          <div class="kpi-sub" id="kpi-pnl-sub">No open positions yet</div>
+        </div>
+
+        <div class="kpi-card" onclick="goTerminalTab('closed')" style="cursor:pointer;" title="Open Closed positions">
+          <div class="kpi-header">
+            <div class="kpi-icon-box icon-winrate">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="8.5 12.5 11 15 15.5 9.5"/></svg>
+            </div>
+            <div class="kpi-title-block">
+              <div class="kpi-label" id="kpi-winrate-label">Historical win rate</div>
+            </div>
+            <svg class="kpi-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          </div>
+          <div class="kpi-value" id="kpi-winrate">--%</div>
+          <div class="kpi-sub" id="kpi-winrate-sub">0 closed trades</div>
+        </div>
+
+        <div class="kpi-card" onclick="goTerminalTab('follows')" style="cursor:pointer;" title="Open Copytrades">
+          <div class="kpi-header">
+            <div class="kpi-icon-box icon-users">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            </div>
+            <div class="kpi-title-block">
+              <div class="kpi-label">Traders you copy</div>
+            </div>
+            <svg class="kpi-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+          </div>
+          <div class="kpi-value" id="kpi-follows-count">0</div>
+          <div class="kpi-sub" id="kpi-pump-only-badge">0 copying · pump-only off · max chase 25%</div>
+        </div>
+      </div>
+
+      <!-- Terminal Controls & Tabs Row (Paper Mode left, Segmented Tabs center, PnL & Date Filter right) -->
+      <div class="kpi-toolbar-header terminal-nav-bar">
+        <div class="kpi-toolbar-left">
+          <div class="paper-mode-card">
+            <div class="pm-text-block">
+              <div class="pm-title-row">
+                <span class="pm-title">Paper Trading</span>
+                <span class="pm-info-icon" title="Simulate live execution without risking real funds.">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <line x1="12" y1="16" x2="12" y2="12"></line>
+                    <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                  </svg>
+                </span>
+              </div>
+            </div>
+            <div class="pm-switch-capsule active" id="pm-switch-capsule" onclick="togglePaperModeClick()" title="Toggle Paper Trading Simulation Mode">
+              <input type="checkbox" id="toggle-paper-mode" class="pm-checkbox" checked onchange="onPaperModeToggle(this.checked)" />
+              <div class="pm-track">
+                <span class="pm-thumb"></span>
+              </div>
+              <span id="pm-status-text" class="pm-status-text">ON</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="term-tabs">
+          <button class="term-tab active" data-term="positions" onclick="switchTermTab('positions')">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
+            <span>Positions</span><span class="tab-count" id="badge-pos-count">0</span>
+          </button>
+          <button class="term-tab" data-term="closed" onclick="switchTermTab('closed')">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="8 12.5 11 15.5 16 9.5"/></svg>
+            <span>Closed</span><span class="tab-count" id="badge-closed-count">0</span>
+          </button>
+          <button class="term-tab" data-term="signals" onclick="switchTermTab('signals')">
+            <span class="live-dot live-dot-green" id="signals-tab-dot"></span>
+            <span>Live Signals</span><span class="tab-count" id="badge-sig-count">0</span>
+          </button>
+        </div>
+
+        <div class="kpi-toolbar-right">
+          <button id="btn-pnl-calendar" class="btn-date-filter" onclick="openPnlCalendar()" title="Realized PnL per day">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/><path d="M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>
+            <span>PnL calendar</span>
+          </button>
+          <button id="btn-date-filter" class="btn-date-filter" onclick="openDateFilterModal()" title="Filter Analytics by Date Range">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect>
+              <line x1="16" y1="2" x2="16" y2="6"></line>
+              <line x1="8" y1="2" x2="8" y2="6"></line>
+              <line x1="3" y1="10" x2="21" y2="10"></line>
+            </svg>
+            <span id="date-filter-label">Today</span>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- SUB-PANEL 1: POSITIONS & LIMIT ORDERS -->
+      <div id="trader-filter-bar" class="trader-filter-bar" hidden></div>
+
+      <div id="term-positions" class="term-panel active">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="title-icon tone-indigo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg></span>
+              <h2 class="card-title">Open Positions</h2>
+              <div class="status-badge-live">
+                <span class="live-dot live-dot-green"></span>
+                <span>Exit engine live</span>
+              </div>
+            </div>
+            <div class="card-actions">
+              <button class="btn btn-sm" onclick="refreshEngineState()" title="Refresh quotes"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Refresh</button>
+              <button class="btn btn-indigo-soft btn-sm" onclick="sellAllPositions(false)" title="Sell every open position but keep copying traders">Sell All</button>
+              <span class="action-divider" aria-hidden="true"></span>
+              <button class="btn btn-panic btn-sm" onclick="sellAllPositions(true)" title="Pause all follows on every chain and sell all positions"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>Panic Sell</button>
+            </div>
+          </div>
+
+          <div id="positions-list"></div>
+        </div>
+      </div>
+
+
+      <!-- SUB-PANEL 1b: LIVE WALLET SIGNALS (signals only) -->
+      <div id="term-closed" class="term-panel">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="title-icon tone-green"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><polyline points="8 12.5 11 15.5 16 9.5"/></svg></span>
+              <div>
+                <h2 class="card-title">Closed Positions</h2>
+                <p class="card-sub" id="closed-sub">Copied trades that have been fully sold</p>
+              </div>
+            </div>
+            <div class="card-actions closed-totals" id="closed-totals"></div>
+          </div>
+          <div class="table-wrap closed-wrap">
+            <table class="data-table closed-table">
+              <thead>
+                <tr>
+                  <th>Token</th>
+                  <th>Bought</th>
+                  <th>Sold</th>
+                  <th>PNL</th>
+                  <th>Opened</th>
+                  <th class="right">Action</th>
+                </tr>
+              </thead>
+              <tbody id="closed-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div id="term-signals" class="term-panel">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="title-icon tone-green"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4l3-8 4 16 3-8h6"/></svg></span>
+              <div>
+                <h2 class="card-title">Live Signals</h2>
+              </div>
+            </div>
+            <div class="card-actions">
+              <button class="btn btn-sm" onclick="pollSignalsNow()" id="btn-poll-now"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>Check now</button>
+              <label class="switch-row" title="Turn live wallet watching on or off">
+                <input type="checkbox" class="rule-toggle" id="watch-enabled" onchange="updateWatchConfig({ enabled: this.checked })" checked />
+                <span>Watching</span>
+              </label>
+            </div>
+          </div>
+
+          <div class="watch-row">
+            <div class="watch-list" id="watch-list"></div>
+            <div class="input-group watch-add">
+              <label class="inp-ico"><span class="inp-ico-sol"><svg viewBox="0 0 397.7 311.7" aria-hidden="true"><use href="#sol-mark"/></svg></span><input type="text" id="watch-add-address" class="input input-compact mono" placeholder="Solana wallet address" aria-label="Wallet address to watch" /></label>
+              <label class="inp-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><circle cx="7" cy="7" r="1.5"/></svg><input type="text" id="watch-add-label" class="input input-compact" placeholder="Label (optional)" maxlength="32" aria-label="Label" /></label>
+              <button class="btn btn-sm btn-watch" onclick="addWatchWallet()"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>Watch wallet</button>
+            </div>
+          </div>
+
+          <details class="watch-settings">
+            <summary><span>Connection &amp; paper-copy settings</span><span class="ws-gear"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>Settings</span></summary>
+            <div class="alchemy-status" id="alchemy-status"></div>
+            <div class="watch-settings-grid">
+              <div class="field">
+                <label>Solana RPC URL</label>
+                <div class="input-group">
+                  <input type="text" id="watch-rpc-url" class="input mono" placeholder="https://api.mainnet-beta.solana.com" />
+                  <button class="btn btn-sm" onclick="updateWatchConfig({ rpcUrl: document.getElementById('watch-rpc-url').value })">Save</button>
+                </div>
+                <span class="field-hint">Alchemy is used automatically when its key is set. Leave blank or type <code>alchemy</code> to switch back to it; the public RPC is rate-limited.</span>
+              </div>
+              <div class="field">
+                <label>Real-time</label>
+                <label class="switch-row">
+                  <input type="checkbox" class="rule-toggle" id="watch-realtime" onchange="updateWatchConfig({ realtime: this.checked })" />
+                  <span>Get each trade pushed the moment it lands (about 1 s), instead of waiting for the next check. Checks keep running as a backup.</span>
+                </label>
+              </div>
+              <div class="field">
+                <label>Backup check every</label>
+                <select id="watch-poll-sec" class="input" onchange="updateWatchConfig({ pollSec: Number(this.value) })">
+                  <option value="1" selected>1 second (fastest)</option>
+                  <option value="2">2 seconds</option>
+                  <option value="5">5 seconds</option>
+                  <option value="10">10 seconds</option>
+                  <option value="15">15 seconds</option>
+                  <option value="30">30 seconds</option>
+                  <option value="60">60 seconds</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Copy followed wallets</label>
+                <label class="switch-row">
+                  <input type="checkbox" class="rule-toggle" id="watch-paper-copy" onchange="updateWatchConfig({ paperCopy: this.checked })" />
+                  <span>Copy every real buy/sell with each follow's settings (paper, needs Paper Trading ON). Off = signals only.</span>
+                </label>
+              </div>
+            </div>
+          </details>
+
+          <div class="table-wrap">
+            <table class="data-table signals-table sig-cards">
+              <thead>
+                <tr>
+                  <th>Token</th>
+                  <th>Trader</th>
+                  <th>Action</th>
+                  <th>Size</th>
+                  <th>Price / MC</th>
+                  <th>Age</th>
+                  <th>Tx</th>
+                  <th class="right"><span class="sr-only">Links</span></th>
+                </tr>
+              </thead>
+              <tbody id="signals-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- SETTINGS PAGE (left menu): copytrades, trading & risk, data, profile, security, notifications -->
+      <div id="term-config" class="term-panel">
+        <div class="cfg-head">
+          <h2 class="card-title">Settings</h2>
+          <p class="card-sub">Everything that controls copying, plus your profile, security and notifications.</p>
+        </div>
+        <div class="cfg-layout">
+          <nav class="cfg-nav" aria-label="Settings sections">
+            <button type="button" class="cfg-nav-btn active" data-cfg="copytrades" onclick="openSettingsSection('copytrades')">
+              <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg></span><span class="cfg-nav-txt"><strong>Copytrades</strong><small>Traders you copy & exit rules</small></span>
+            </button>
+            <button type="button" class="cfg-nav-btn" data-cfg="trading" onclick="openSettingsSection('trading')">
+              <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span><span class="cfg-nav-txt"><strong>Trading & risk</strong><small>Slippage, filters, limits</small></span>
+            </button>
+            <button type="button" class="cfg-nav-btn" data-cfg="data" onclick="openSettingsSection('data')">
+              <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></span><span class="cfg-nav-txt"><strong>Data & storage</strong><small>Database, backups, Supabase</small></span>
+            </button>
+            <button type="button" class="cfg-nav-btn" data-cfg="profile" onclick="openSettingsSection('profile')">
+              <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span><span class="cfg-nav-txt"><strong>Profile</strong><small>Name, time, start page</small></span>
+            </button>
+            <button type="button" class="cfg-nav-btn" data-cfg="security" onclick="openSettingsSection('security')">
+              <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span><span class="cfg-nav-txt"><strong>Security</strong><small>Access, keys, confirmations</small></span>
+            </button>
+            <button type="button" class="cfg-nav-btn" data-cfg="notifications" onclick="openSettingsSection('notifications')">
+              <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span><span class="cfg-nav-txt"><strong>Notifications</strong><small>Pop-ups and sound</small></span>
+            </button>
+          </nav>
+          <div class="cfg-body">
+            <section class="cfg-section active" data-cfg="copytrades" id="term-follows">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="title-icon tone-purple"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
+              <h2 class="card-title">Traders You Copy</h2>
+              <span class="pill-soft" id="follows-header-summary">0 traders · 0 copying</span>
+            </div>
+            <div class="card-actions">
+              <button class="btn btn-sm" id="btn-toggle-pump-only" onclick="toggleAccountPumpOnly()">Pump-Only: OFF</button>
+              <button class="btn btn-sm" onclick="pauseAllFollows()">Pause All</button>
+              <button class="btn btn-sm" onclick="resumeAllFollows()">Resume All</button>
+              <button class="btn btn-primary btn-sm" onclick="openQuickCopyModal()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Copy a Trader</button>
+            </div>
+          </div>
+
+          <div id="follows-list"></div>
+        </div>
+      </section>
+            <section class="cfg-section" data-cfg="trading" id="term-settings">
+        <div class="card real-card" id="real-trading-card">
+          <div class="card-header">
+            <div class="card-title-group"><span class="title-icon tone-amber"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></span><div><h3 class="card-title">Real trading</h3><p class="card-sub">Paper Trading OFF + bot wallet key = copies spend real SOL (via Jupiter)</p></div></div>
+            <div class="card-actions">
+              <button class="btn btn-sm btn-ghost" onclick="refreshRealPanel()">Refresh</button>
+              <button class="btn btn-sm" onclick="runRealSelfTest()">Run safe test</button>
+            </div>
+          </div>
+          <div id="real-trading-body" class="real-body"><p class="real-muted">Loading…</p></div>
+        </div>
+        <div class="grid-2">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title-group"><span class="title-icon tone-indigo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span><div><h3 class="card-title">Execution</h3><p class="card-sub">Slippage, chase limits and fees for copied buys</p></div></div>
+              <button class="btn btn-sm btn-ghost" onclick="resetAllSettings()">Reset defaults</button>
+            </div>
+
+            <div class="form-section-label">Slippage &amp; chase</div>
+            <div class="form-row">
+              <div class="field">
+                <label>Solana Buy Slippage %</label>
+                <input type="number" id="set-buy-slip-sol" class="input mono" min="0.1" max="100" step="0.5" value="15" />
+              </div>
+              <div class="field">
+                <label>EVM Buy Slippage % (Blank = Dynamic)</label>
+                <input type="number" id="set-buy-slip-evm" class="input mono" min="0.1" max="100" step="0.5" placeholder="Dynamic (>=3%)" />
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="field">
+                <label>Max Chase % (Quote vs Fill)</label>
+                <input type="number" id="set-max-chase" class="input mono" min="1" max="1000" step="1" value="25" />
+              </div>
+              <div class="field">
+                <label>Sell Slippage % (Blank = Auto-widening)</label>
+                <input type="number" id="set-sell-slip" class="input mono" min="0.1" max="100" step="0.5" placeholder="Auto-widening" />
+              </div>
+            </div>
+
+            <div class="form-section-label">Fees &amp; behaviour</div>
+            <div class="form-row">
+              <div class="field">
+                <label>Priority Fee Tier</label>
+                <select id="set-priority-mode" class="input">
+                  <option value="normal">Normal (Market Auto)</option>
+                  <option value="fast">Fast (&gt;=0.001 SOL)</option>
+                  <option value="turbo">Turbo (&gt;=0.005 SOL)</option>
+                  <option value="custom">Custom SOL Tip</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Retry Buys on Slippage Spike</label>
+                <select id="set-retry-buys" class="input">
+                  <option value="true">ON (Default)</option>
+                  <option value="false">OFF</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="field">
+                <label>Buy-Once Cooldown</label>
+                <select id="set-cooldown-mode" class="input">
+                  <option value="10m">ON — 10 Minutes (Default)</option>
+                  <option value="holding">ON — While Holding Coin</option>
+                  <option value="60s">ON — 60 Seconds</option>
+                  <option value="off">OFF — Copy Every Buy</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Trading Asset Mode</label>
+                <select id="set-trading-asset" class="input">
+                  <option value="stable">Stablecoin (USDC)</option>
+                  <option value="native">Native Coin (SOL / BNB)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="card-footer"><button class="btn btn-primary" onclick="saveExecutionSettings()">Save execution settings</button></div>
+          </div>
+
+          <div class="card">
+            <div class="card-header">
+              <div class="card-title-group"><span class="title-icon tone-green"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span><div><h3 class="card-title">Safety &amp; Risk</h3><p class="card-sub">Which coins to skip and when to stop copying</p></div></div>
+            </div>
+
+            <div class="form-section-label">Market filters</div>
+            <div class="form-row">
+              <div class="field">
+                <label>Launchpad-Only Filter</label>
+                <select id="set-pump-only" class="input">
+                  <option value="false">OFF — Any Market</option>
+                  <option value="true">ON — Launchpads Only</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Launchpad Stage</label>
+                <select id="set-stage" class="input">
+                  <option value="any">Any Stage</option>
+                  <option value="pre-grad">Pre-Graduation (Bonding)</option>
+                  <option value="graduated">Graduated (Raydium / DEX)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="field">
+                <label>Min Market Cap USD</label>
+                <input type="number" id="set-min-mc" class="input mono" placeholder="No min" />
+              </div>
+              <div class="field">
+                <label>Max Market Cap USD</label>
+                <input type="number" id="set-max-mc" class="input mono" placeholder="No max" />
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="field">
+                <label>Min Leader Buy (Native Coin)</label>
+                <input type="number" id="set-min-buy-size" class="input mono" placeholder="No min" />
+              </div>
+              <div class="field">
+                <label>Max Leader Buy (Native Coin)</label>
+                <input type="number" id="set-max-buy-size" class="input mono" placeholder="No max" />
+              </div>
+            </div>
+
+            <div class="form-section-label">Token safety</div>
+            <div class="form-row">
+              <div class="field">
+                <label>Block Risky Coins (Honeypot / Freeze)</label>
+                <select id="set-safe-risky" class="input">
+                  <option value="true">ON (Honeypot / Freeze)</option>
+                  <option value="false">OFF</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Block Mintable Supply</label>
+                <select id="set-safe-mint" class="input">
+                  <option value="false">OFF (Allow Mintable)</option>
+                  <option value="true">ON (Strict Fixed Supply)</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="form-row">
+              <div class="field">
+                <label>Strict Non-Pump Verification</label>
+                <select id="set-safe-strict" class="input">
+                  <option value="false">OFF (All Pairs)</option>
+                  <option value="true">ON (Verified Pairs Only)</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Solana Total Open Exposure Limit ($)</label>
+                <input type="number" id="set-risk-exposure" class="input mono" placeholder="No limit" />
+              </div>
+            </div>
+
+            <div class="form-section-label">Risk limits</div>
+            <div class="form-row">
+              <div class="field">
+                <label>24h Daily Loss Limit USD</label>
+                <input type="number" id="set-risk-daily" class="input mono" placeholder="Off (e.g. 500)" />
+              </div>
+              <div class="field">
+                <label>Losing Streak Limit (2-20)</label>
+                <input type="number" id="set-risk-streak" class="input mono" min="2" max="20" placeholder="Off (e.g. 5)" />
+              </div>
+            </div>
+
+            <div class="card-footer"><button class="btn btn-primary" onclick="saveFilterAndRiskSettings()">Save safety &amp; risk</button></div>
+          </div>
+        </div>
+</section>
+            <section class="cfg-section" data-cfg="data">        <div class="card db-card" id="db-card">
+          <div class="card-header">
+            <div class="card-title-group">
+              <span class="title-icon tone-blue"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v6c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 11v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/></svg></span>
+              <div><h3 class="card-title">Data &amp; storage</h3><p class="card-sub">Follows, positions, history, wallets and settings are saved automatically and restored on restart</p></div>
+            </div>
+            <div class="card-actions">
+              <button class="btn btn-sm" onclick="saveDatabaseNow()">Save now</button>
+              <a class="btn btn-sm" href="/api/db/export" download>Download backup</a>
+              <label class="btn btn-sm db-restore">Restore backup<input type="file" accept="application/json,.json" onchange="restoreDatabaseBackup(this)" hidden /></label>
+            </div>
+          </div>
+          <div class="db-grid" id="db-grid">
+            <div class="meta-item"><span>Database</span><strong id="db-engine">—</strong></div>
+            <div class="meta-item"><span>File</span><strong class="mono" id="db-file">—</strong></div>
+            <div class="meta-item"><span>Size</span><strong class="mono" id="db-size">—</strong></div>
+            <div class="meta-item"><span>Last saved</span><strong id="db-saved">—</strong></div>
+            <div class="meta-item"><span>Stored</span><strong id="db-counts">—</strong></div>
+          </div>
+          <p class="field-hint db-hint" id="db-hint"></p>
+
+          <div class="sb-cloud" id="sb-cloud">
+            <div class="sbc-head">
+              <div class="sbc-title">
+                <svg width="18" height="18" viewBox="0 0 109 113" aria-hidden="true"><path d="M63.7 110.3c-2.9 3.6-8.6 1.6-8.7-3L54.1 40h45.6c8.3 0 12.9 9.6 7.7 16z" fill="#249361"/><path d="M45.3 2.1c2.9-3.6 8.6-1.6 8.7 3l.4 67.3H9.6c-8.3 0-12.9-9.6-7.7-16z" fill="#3ECF8E"/></svg>
+                <div><strong>Supabase cloud backup</strong><span id="sbc-sub">Copy every save to your Supabase project so data survives a lost PC</span></div>
+              </div>
+              <span class="sbc-pill" id="sbc-pill">Not connected</span>
+            </div>
+
+            <div class="sbc-connected" id="sbc-connected" hidden>
+              <div class="sbc-grid">
+                <div><span>Project</span><strong class="mono" id="sbc-host">—</strong></div>
+                <div><span>Table</span><strong class="mono" id="sbc-table">—</strong></div>
+                <div><span>Key</span><strong class="mono" id="sbc-key">—</strong></div>
+                <div><span>Last sync</span><strong id="sbc-sync">—</strong></div>
+              </div>
+              <div class="sbc-actions">
+                <button class="btn btn-sm" onclick="supabaseSyncNow()">Sync now</button>
+                <button class="btn btn-sm" onclick="supabaseRestore()">Restore from Supabase</button>
+                <button class="btn btn-sm btn-ghost-danger" onclick="supabaseDisconnect()">Disconnect</button>
+              </div>
+            </div>
+
+            <div class="sbc-form" id="sbc-form">
+              <div class="form-row">
+                <div class="field">
+                  <label for="sbc-url">Project URL</label>
+                  <input type="url" id="sbc-url" class="input mono" placeholder="https://xxxx.supabase.co" autocomplete="off" spellcheck="false" />
+                </div>
+                <div class="field">
+                  <label for="sbc-secret">Service role key</label>
+                  <input type="password" id="sbc-secret" class="input mono" placeholder="Project settings → API → service_role" autocomplete="off" />
+                </div>
+              </div>
+              <details class="sbc-sql">
+                <summary>Step 1 · create the table (run once in Supabase → SQL editor)</summary>
+                <pre class="mono" id="sbc-sql-text"></pre>
+                <button class="btn btn-sm" onclick="copySupabaseSql()">Copy SQL</button>
+              </details>
+              <div class="sbc-actions">
+                <button class="btn btn-primary btn-sm" onclick="supabaseConnect()">Connect &amp; back up</button>
+                <span class="sbc-note">The key is stored only in the server's <code>.env</code> file and never sent to the browser.</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+            <section class="cfg-section" data-cfg="profile">
+        <div class="card">
+          <div class="card-header"><div class="card-title-group"><span class="title-icon tone-indigo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span><div><h3 class="card-title">Profile</h3><p class="card-sub">How the terminal greets you and shows times. Saved on this server.</p></div></div></div>
+          <div class="cfg-form">
+            <div class="field"><label for="ui-display-name">Display name</label><input id="ui-display-name" class="input" maxlength="32" placeholder="e.g. Odex" /><span class="field-hint">Shown on the account button and PnL cards.</span></div>
+            <div class="field"><label for="ui-timezone">Show times in</label><select id="ui-timezone" class="input"><option value="local">My computer's time zone</option><option value="utc">UTC</option></select></div>
+            <div class="field"><label for="ui-landing">Open on</label><select id="ui-landing" class="input"><option value="positions">Positions</option><option value="closed">Closed positions</option><option value="signals">Live Signals</option></select><span class="field-hint">The tab shown when you open or reload the terminal.</span></div>
+            <div class="field"><label>Linked Phantom wallet</label><div class="cfg-inline" id="cfg-phantom-row">—</div></div>
+            <div class="field"><label>Signed in as</label><div class="cfg-inline"><span id="cfg-session">—</span><button class="btn btn-sm" onclick="logout()">Sign out</button></div></div>
+          </div>
+          <div class="card-footer"><button class="btn btn-primary" onclick="saveUiSettings('profile')">Save profile</button></div>
+        </div>
+            </section>
+            <section class="cfg-section" data-cfg="security">
+        <div class="card">
+          <div class="card-header"><div class="card-title-group"><span class="title-icon tone-green"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span><div><h3 class="card-title">Security</h3><p class="card-sub">Who can open this terminal and how your keys are kept.</p></div></div></div>
+          <div class="cfg-list">
+            <div class="cfg-item">
+              <div><strong>Network access</strong><p id="sec-access-text">Checking…</p></div>
+              <label class="switch-row"><input type="checkbox" class="rule-toggle" id="sec-lan" onchange="setLanAccess(this.checked)" /><span>Allow other devices on my network</span></label>
+            </div>
+            <div class="cfg-item">
+              <div><strong>Confirm sells</strong><p>Ask before Initials, 50% and 100% sells on a position. Sell All and Panic Sell always ask.</p></div>
+              <label class="switch-row"><input type="checkbox" class="rule-toggle" id="sec-confirm-sells" onchange="saveUiSettings('security')" /><span>Ask first</span></label>
+            </div>
+            <div class="cfg-item">
+              <div><strong>Hide balances</strong><p>Blur dollar amounts and balances, e.g. while sharing your screen. Hover a value to see it.</p></div>
+              <label class="switch-row"><input type="checkbox" class="rule-toggle" id="sec-hide-balances" onchange="saveUiSettings('security')" /><span>Hide</span></label>
+            </div>
+            <div class="cfg-item cfg-keys">
+              <div><strong>API keys</strong><p>Keys stay in the <code>.env</code> file on this computer. The browser only ever sees masked versions; they are never saved in the database or backups.</p></div>
+              <div class="cfg-keylist" id="sec-keys"></div>
+            </div>
+            <div class="cfg-item">
+              <div><strong>Real funds</strong><p>Odex Mirror only paper-trades: it never signs transactions or moves money. A linked Phantom wallet is read-only (address and balance).</p></div>
+              <span class="sig-pill sp-ok">Read-only</span>
+            </div>
+          </div>
+        </div>
+            </section>
+            <section class="cfg-section" data-cfg="notifications">
+        <div class="card">
+          <div class="card-header"><div class="card-title-group"><span class="title-icon tone-amber"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span><div><h3 class="card-title">Notifications</h3><p class="card-sub">Which pop-ups appear in the corner. Everything is still recorded in History either way.</p></div></div></div>
+          <div class="cfg-list">
+            <div class="cfg-item"><div><strong>Copied buys</strong><p>“Copied @trader: Bought $TOKEN”.</p></div><label class="switch-row"><input type="checkbox" class="rule-toggle" id="ntf-copies" onchange="saveUiSettings('notifications')" /><span>Show</span></label></div>
+            <div class="cfg-item"><div><strong>Sells</strong><p>Exit rules, mirror sells and manual sells, with the result.</p></div><label class="switch-row"><input type="checkbox" class="rule-toggle" id="ntf-sells" onchange="saveUiSettings('notifications')" /><span>Show</span></label></div>
+            <div class="cfg-item"><div><strong>Skipped copies</strong><p>When a trade wasn't copied and why (routine skips such as cooldowns stay quiet).</p></div><label class="switch-row"><input type="checkbox" class="rule-toggle" id="ntf-skips" onchange="saveUiSettings('notifications')" /><span>Show</span></label></div>
+            <div class="cfg-item"><div><strong>Problems</strong><p>Errors such as a failed sell or a connection problem.</p></div><label class="switch-row"><input type="checkbox" class="rule-toggle" id="ntf-problems" onchange="saveUiSettings('notifications')" /><span>Show</span></label></div>
+            <div class="cfg-item"><div><strong>Sound</strong><p>A short chime when a trade is copied or sold.</p></div><div class="cfg-inline"><label class="switch-row"><input type="checkbox" class="rule-toggle" id="ntf-sound" onchange="saveUiSettings('notifications')" /><span>Play</span></label><button class="btn btn-sm" onclick="playChime(true)">Test</button></div></div>
+          </div>
+        </div>
+            </section>
+          </div>
+        </div>
+      </div>
+
+      <!-- SUB-PANEL 4: WALLETS -->
+      <div id="term-wallets" class="term-panel">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group"><span class="title-icon tone-blue"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12V8H6a2 2 0 0 1-2-2c0-1.1.9-2 2-2h12v4"/><path d="M4 6v12c0 1.1.9 2 2 2h14v-4"/><path d="M18 12a2 2 0 0 0-2 2c0 1.1.9 2 2 2h4v-4h-4z"/></svg></span><div><h3 class="card-title">Connected Wallet <span class="sw-head-status" id="wallet-head-status"><span class="dot"></span>Active</span></h3><p class="card-sub">Your real SOL and USDC balance, read live from the Solana blockchain.</p></div></div>
+            <button class="btn btn-sm sw-add" onclick="createNewWallet()"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>Add Wallet</button>
+          </div>
+          <div id="wallets-list"></div>
+        </div>
+
+      </div>
+
+      <!-- SUB-PANEL 5: HISTORY & RECEIPTS -->
+      <div id="term-history" class="term-panel">
+        <div class="card">
+          <div class="card-header">
+            <div class="card-title-group"><span class="title-icon tone-indigo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span><div><h3 class="card-title">Trade History</h3><p class="card-sub">Every fill and every skipped copy, with the reason</p></div></div>
+            <div class="card-actions">
+              <button class="btn btn-sm btn-danger-soft btn-clear-history" id="btn-clear-history" onclick="clearHistory()" title="Remove every entry from the history list">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+                Clear history
+              </button>
+              <select id="history-filter" class="input input-auto" onchange="renderHistoryTable()">
+                <option value="all">All Events</option>
+                <option value="filled">Filled Trades</option>
+                <option value="skipped">Skipped Decisions</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th>Status</th>
+                  <th>Action</th>
+                  <th>Chain</th>
+                  <th>Coin</th>
+                  <th>Leader</th>
+                  <th class="num">Amount</th>
+                  <th class="num">PnL / gap</th>
+                  <th>Detail</th>
+                </tr>
+              </thead>
+              <tbody id="history-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================================================================== -->
+    <!-- VIEW 5: DOCS                                                          -->
+    <!-- ===================================================================== -->
+    <section id="view-docs" class="page-view">
+      <div class="page-head">
+        <div>
+          <h1 class="page-title">How the engine works</h1>
+          <p class="page-sub">Every copied trade passes six steps, then the exit engine re-checks five rules every 2 seconds.</p>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><div class="card-title-group"><span class="title-icon tone-indigo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg></span><h2 class="card-title">6-step copy pipeline</h2></div></div>
+        <ol class="pipeline">
+          <li><span class="pipe-num">1</span><div><strong>Watch</strong><p>The Solana wallets you follow, read live from the blockchain.</p></div></li>
+          <li><span class="pipe-num">2</span><div><strong>Filter</strong><p>Entry filters and token safety audit.</p></div></li>
+          <li><span class="pipe-num">3</span><div><strong>Size</strong><p>Fixed $, % of balance, or proportional 1:1.</p></div></li>
+          <li><span class="pipe-num">4</span><div><strong>Verify</strong><p>Slippage and the 25% max-chase guard.</p></div></li>
+          <li><span class="pipe-num">5</span><div><strong>Execute</strong><p>Paper trade filled at the live market price (no real funds).</p></div></li>
+          <li><span class="pipe-num">6</span><div><strong>Exit</strong><p>Hand-off to the 5-rule auto-exit engine.</p></div></li>
+        </ol>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header"><div class="card-title-group"><span class="title-icon tone-purple"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span><h2 class="card-title">5-rule auto-exit</h2></div><span class="pill-soft">Checked every 2s</span></div>
+          <div class="rule-list">
+            <div class="rule-item"><span class="rule-num">1</span><div><strong>Take Initials</strong><p>At a target gain (e.g. +25%), sell the main chunk (75%) and keep a moonbag.</p></div></div>
+            <div class="rule-item"><span class="rule-num">2</span><div><strong>Moonbag Trail</strong><p>Trailing stop off the peak (e.g. 25%), armed once the position is up +10%.</p></div></div>
+            <div class="rule-item"><span class="rule-num">3</span><div><strong>Two-Stage Floor</strong><p>A wide opening stop (−45%) that tightens to −20% after 50 seconds.</p></div></div>
+            <div class="rule-item"><span class="rule-num">4</span><div><strong>Wave-Cut</strong><p>Exit after 90 seconds if the peak never reached +5%.</p></div></div>
+            <div class="rule-item"><span class="rule-num">5</span><div><strong>Hard Time Cap</strong><p>Close the main position after 300 seconds, leaving the moonbag.</p></div></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><div class="card-title-group"><span class="title-icon tone-green"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span><h2 class="card-title">Execution protection</h2></div></div>
+          <div class="rule-list">
+            <div class="rule-item"><span class="rule-num rule-num-green"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><div><strong>Max Chase (25%)</strong><p>Compares your quote to the leader's fill and skips if the price already ran past the threshold.</p></div></div>
+            <div class="rule-item"><span class="rule-num rule-num-green"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><div><strong>Honeypot block</strong><p>Skips tokens flagged as honeypots (tokens that cannot be sold).</p></div></div>
+            <div class="rule-item"><span class="rule-num rule-num-green"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><div><strong>Freeze / mint authority block</strong><p>Skips Solana tokens whose freeze or mint authority is still active.</p></div></div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+  </div>
+
+  <!-- MODAL 1: COPY TRADER -->
+  <div id="modal-copy" class="modal-backdrop">
+    <div class="modal-box">
+      <div class="card-header">
+        <h3 class="card-title">Copy a Trader</h3>
+        <button class="btn-icon" onclick="closeModal('modal-copy')" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <p class="modal-lead">Paste the Solana wallet you want to copy. Every buy and sell that wallet makes on-chain is copied with the settings below.</p>
+      <div class="field field-spaced">
+        <label for="copy-wallet-input">Trader wallet address</label>
+        <div class="input-group">
+          <input type="text" id="copy-wallet-input" class="input mono" placeholder="Solana address, e.g. 7xKX…gAsU" autocomplete="off" spellcheck="false" oninput="onCopyWalletInput()" />
+          <button class="btn" id="copy-check-btn" onclick="checkCopyWallet()">Check wallet</button>
+        </div>
+      </div>
+      <div id="copy-wallet-report" class="lookup-card" style="display:none;"></div>
+
+      <div class="form-row">
+        <div class="field">
+          <label for="copy-name">Name (optional)</label>
+          <input type="text" id="copy-name" class="input" placeholder="e.g. Whale 1" maxlength="32" />
+        </div>
+        <div class="field">
+          <label for="copy-mode">When they sell</label>
+          <select id="copy-mode" class="input">
+            <option value="auto-exit" selected>Auto-Exit: my exit rules decide</option>
+            <option value="mirror">Mirror: sell when they sell</option>
+            <option value="buy-and-hold">Buy &amp; Hold: only TP / SL</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-row">
+        <div class="field">
+          <label for="copy-sizing-type">Size each copy by</label>
+          <select id="copy-sizing-type" class="input" onchange="onCopySizingType()">
+            <option value="fixed" selected>Fixed $ per trade</option>
+            <option value="percent">% of my balance</option>
+            <option value="proportional">Same $ as trader (with cap)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="copy-sizing-amount" id="copy-sizing-label">Amount ($)</label>
+          <input type="number" id="copy-sizing-amount" class="input mono" value="50" min="0.1" step="any" />
+        </div>
+      </div>
+
+      <div class="form-row">
+        <div class="field">
+          <label for="copy-tp">Take profit %</label>
+          <input type="number" id="copy-tp" class="input mono" placeholder="Off" min="1" />
+        </div>
+        <div class="field">
+          <label for="copy-sl">Stop loss %</label>
+          <input type="number" id="copy-sl" class="input mono" placeholder="Off" min="1" max="99" />
+        </div>
+      </div>
+
+      <div class="form-row form-row-3">
+        <div class="field">
+          <label for="copy-min-trade">Skip trader buys under ($)</label>
+          <input type="number" id="copy-min-trade" class="input mono" value="1" min="0" step="any" />
+        </div>
+        <div class="field">
+          <label for="copy-max-open">Max open positions</label>
+          <input type="number" id="copy-max-open" class="input mono" value="10" min="1" />
+        </div>
+        <div class="field">
+          <label for="copy-max-risk">Max at risk ($)</label>
+          <input type="number" id="copy-max-risk" class="input mono" value="1000" min="1" />
+        </div>
+      </div>
+      <p class="modal-note">Copies run in Paper Trading with live prices. Slippage, max chase, safety and risk limits from Settings &amp; Risk also apply.</p>
+
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-copy')">Cancel</button>
+        <button class="btn btn-primary" onclick="submitCreateFollow()">Confirm &amp; Start Copying</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 2: 5-RULE EXIT ENGINE -->
+  <div id="modal-exit-rules" class="modal-backdrop">
+    <div class="modal-box">
+      <div class="card-header">
+        <h3 class="card-title" id="exit-modal-title">Exit rules</h3>
+        <button class="btn-icon" onclick="closeModal('modal-exit-rules')" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <input type="hidden" id="edit-follow-id" />
+      <div class="form-row" style="margin-bottom:16px;">
+        <div class="field">
+          <label>Mode</label>
+          <select id="edit-follow-mode" class="input">
+            <option value="auto-exit">Auto-Exit</option>
+            <option value="buy-and-hold">Buy &amp; Hold</option>
+            <option value="mirror">Mirror</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Trade Size ($)</label>
+          <input type="number" id="edit-follow-size" class="input mono" />
+        </div>
+        <div class="field">
+          <label>TP %</label>
+          <input type="number" id="edit-follow-tp" class="input mono" />
+        </div>
+        <div class="field">
+          <label>SL %</label>
+          <input type="number" id="edit-follow-sl" class="input mono" />
+        </div>
+      </div>
+
+      <div class="rule-rows">
+        <!-- Rule 1 -->
+        <div class="rule-row">
+          <div>
+            <strong>1. Take Initials</strong>
+            <div class="rule-row-desc">Sell % of bag at target move</div>
+          </div>
+          <div class="rule-row-inputs">
+            <label class="rule-field"><input type="number" id="rule-ti-at" class="input input-xs mono" value="25" /><span>at +%</span></label>
+            <label class="rule-field"><input type="number" id="rule-ti-size" class="input input-xs mono" value="75" /><span>sell %</span></label>
+            <input type="checkbox" id="rule-ti-on" class="rule-toggle" />
+          </div>
+        </div>
+        <!-- Rule 2 -->
+        <div class="rule-row">
+          <div>
+            <strong>2. Moonbag Trail</strong>
+            <div class="rule-row-desc">Trail off peak once armed</div>
+          </div>
+          <div class="rule-row-inputs">
+            <label class="rule-field"><input type="number" id="rule-mt-trail" class="input input-xs mono" value="25" /><span>trail %</span></label>
+            <label class="rule-field"><input type="number" id="rule-mt-arms" class="input input-xs mono" value="10" /><span>arm +%</span></label>
+            <input type="checkbox" id="rule-mt-on" class="rule-toggle" />
+          </div>
+        </div>
+        <!-- Rule 3 -->
+        <div class="rule-row">
+          <div>
+            <strong>3. Two-Stage Floor</strong>
+            <div class="rule-row-desc">Initial stop tightens after time</div>
+          </div>
+          <div class="rule-row-inputs">
+            <label class="rule-field"><input type="number" id="rule-fl-open" class="input input-xs mono" value="45" /><span>open %</span></label>
+            <label class="rule-field"><input type="number" id="rule-fl-sec" class="input input-xs mono" value="50" /><span>after s</span></label>
+            <label class="rule-field"><input type="number" id="rule-fl-tight" class="input input-xs mono" value="20" /><span>tight %</span></label>
+            <input type="checkbox" id="rule-fl-on" class="rule-toggle" />
+          </div>
+        </div>
+        <!-- Rule 4 -->
+        <div class="rule-row">
+          <div>
+            <strong>4. Wave-Cut</strong>
+            <div class="rule-row-desc">Exit if stagnant after N sec</div>
+          </div>
+          <div class="rule-row-inputs">
+            <label class="rule-field"><input type="number" id="rule-wc-sec" class="input input-xs mono" value="90" /><span>after s</span></label>
+            <label class="rule-field"><input type="number" id="rule-wc-peak" class="input input-xs mono" value="5" /><span>peak %</span></label>
+            <input type="checkbox" id="rule-wc-on" class="rule-toggle" />
+          </div>
+        </div>
+        <!-- Rule 5 -->
+        <div class="rule-row">
+          <div>
+            <strong>5. Hard Time Cap</strong>
+            <div class="rule-row-desc">Max duration time stop (seconds)</div>
+          </div>
+          <div class="rule-row-inputs">
+            <label class="rule-field"><input type="number" id="rule-tc-sec" class="input input-xs mono" value="300" /><span>seconds</span></label>
+            <input type="checkbox" id="rule-tc-on" class="rule-toggle" />
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-exit-rules')">Cancel</button>
+        <button class="btn btn-primary" onclick="saveFollowExitRules()">Save Rules</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 3: PNL CARD -->
+  <div id="modal-pnl-card" class="modal-backdrop">
+    <div class="modal-box pnlcard-box" role="dialog" aria-modal="true" aria-label="Share PnL card">
+      <canvas id="pnl-canvas" width="2400" height="1350" class="pnlcard-canvas"></canvas>
+      <div class="pnlcard-actions">
+        <button class="btn" onclick="copyPnlCard()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>Copy image</button>
+        <button class="btn btn-primary" onclick="downloadPnlCard()"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></svg>Download PNG</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 4: EXCHANGE (Convert / Deposit / Buy) -->
+  <div id="modal-deposit" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="exch-title">
+    <div class="modal-box exch-box">
+      <div class="exch-head">
+        <h3 class="exch-title" id="exch-title">Deposit SOL</h3>
+        <button class="btn-icon exch-close" onclick="closeModal('modal-deposit')" aria-label="Close"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+
+      <div class="exch-pane active" data-pane="deposit">
+        <p class="exch-hint" id="dep-hint">Send SOL or Solana tokens to this address. Scan the QR with Phantom, Solflare or any Solana wallet.</p>
+
+        <div class="exch-address-card" id="dep-card">
+          <div class="exch-qr" id="dep-qr"></div>
+          <div class="exch-addr-info">
+            <div class="exch-addr-label" id="dep-addr-label">SOL Deposit Address</div>
+            <div class="exch-addr mono" id="dep-addr-text"></div>
+            <button class="btn-icon exch-copy-mini" id="dep-copy-mini" onclick="copyDepositAddress()" title="Copy address" aria-label="Copy address"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+          </div>
+        </div>
+        <input type="hidden" id="deposit-sol-addr" />
+
+        <div class="dep-set" id="dep-set" hidden>
+          <label for="dep-set-input">Your Solana wallet address</label>
+          <div class="dep-set-row">
+            <input type="text" id="dep-set-input" class="input mono" placeholder="Paste an address you own" autocomplete="off" spellcheck="false" />
+            <button class="btn" onclick="saveDepositAddress()">Use address</button>
+          </div>
+          <p class="dep-set-note">Odex Mirror never holds your keys. Deposits go to a wallet you control, such as Phantom.</p>
+        </div>
+
+        <p class="exch-buy-hint">Don't have any SOL? <button class="link-btn" onclick="openOnramper()">Buy through Onramper ↗</button></p>
+
+        <button class="btn-exch-primary" id="btn-copy-address" onclick="copyDepositAddress()">Copy Address</button>
+
+        <button class="btn-phantom" id="btn-phantom" onclick="phantomButtonClick()">
+          <svg class="phantom-ghost" width="20" height="20" viewBox="0 0 128 128" aria-hidden="true"><path fill="currentColor" d="M64 12C34.2 12 12 35.9 12 64.5v44.1c0 4.6 5.6 6.9 8.8 3.6l6.3-6.4c1.9-1.9 5-1.9 6.9 0l6.6 6.7c1.9 1.9 5 1.9 6.9 0l6.6-6.7c1.9-1.9 5-1.9 6.9 0l6.6 6.7c1.9 1.9 5 1.9 6.9 0l6.6-6.7c1.9-1.9 5-1.9 6.9 0l6.3 6.4c3.2 3.3 8.8 1 8.8-3.6V64.5C116 35.9 93.8 12 64 12z"/><ellipse cx="48" cy="58" rx="7" ry="10" fill="#AB9FF2"/><ellipse cx="80" cy="58" rx="7" ry="10" fill="#AB9FF2"/></svg>
+          <span id="btn-phantom-label">Connect Phantom</span>
+        </button>
+        <div class="phantom-linked" id="phantom-linked" hidden></div>
+
+        <div class="exch-test" id="exch-test">
+          <span>Paper trading balance · <strong class="mono" id="paper-bal">$10,000.00</strong></span>
+          <div class="btn-row">
+            <button class="btn btn-sm" onclick="addPaperFunds(100)">+ $100</button>
+            <button class="btn btn-sm" onclick="addPaperFunds(500)">+ $500</button>
+            <button class="btn btn-sm" onclick="addPaperFunds(1000)">+ $1,000</button>
+            <button class="btn btn-sm" onclick="addPaperFunds(0, true)">Reset</button>
+            <button class="btn btn-sm" onclick="openPaperBalance(engineState.wallets.find((w) => w.active)?.id)">Set amount…</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 5: USER PROFILE & PREFERENCES -->
+  <!-- PnL CALENDAR -->
+  <div id="modal-pnl-calendar" class="modal-backdrop" onclick="if(event.target===this) closeModal('modal-pnl-calendar')">
+    <div class="modal-box pnlc-box" role="dialog" aria-modal="true" aria-labelledby="pnlc-title">
+      <div class="pnlc-head">
+        <h3 id="pnlc-title">PnL Calendar (Solana)</h3>
+        <div class="pnlc-mode" role="tablist" aria-label="Trades">
+          <button type="button" role="tab" data-mode="paper" onclick="setPnlCalMode('paper')">Paper</button>
+          <button type="button" role="tab" data-mode="real" onclick="setPnlCalMode('real')">Real SOL</button>
+        </div>
+        <div class="pnlc-nav">
+          <button type="button" class="pnlc-ico" onclick="shiftPnlCal(-1)" aria-label="Previous month"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></button>
+          <strong id="pnlc-month">—</strong>
+          <button type="button" class="pnlc-ico" onclick="shiftPnlCal(1)" aria-label="Next month"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg></button>
+          <button type="button" class="pnlc-cur-toggle" id="pnlc-cur-btn" onclick="togglePnlCalCurrency()" title="Switch between USD and SOL" aria-label="Switch between USD and SOL">
+            <span class="pnlc-cur-unit cur-usd active">USD</span>
+            <span class="pnlc-cur-divider">/</span>
+            <span class="pnlc-cur-unit cur-sol">SOL</span>
+          </button>
+          <button type="button" class="pnlc-ico pnlc-trophy" id="pnlc-best-btn" onclick="togglePnlBest()" title="Highlight best and worst day" aria-label="Highlight best and worst day"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0V4z"/><path d="M17 5h3v2a3 3 0 0 1-3 3M7 5H4v2a3 3 0 0 0 3 3"/></svg></button>
+          <button type="button" class="pnlc-ico" onclick="closeModal('modal-pnl-calendar')" aria-label="Close"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+        </div>
+      </div>
+      <div class="pnlc-total" id="pnlc-total">Total PnL for the month: $0.00</div>
+      <div class="pnlc-split">
+        <span class="pnlc-w" id="pnlc-wins">0 / $0.00</span>
+        <span class="pnlc-l" id="pnlc-losses">0 / $0.00</span>
+      </div>
+      <div class="pnlc-bar"><i id="pnlc-bar-w"></i><i id="pnlc-bar-l"></i></div>
+      <div class="pnlc-week"><span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Fri</span><span>Sat</span><span>Sun</span></div>
+      <div class="pnlc-grid" id="pnlc-grid"></div>
+      <div class="pnlc-note" id="pnlc-note"></div>
+    </div>
+  </div>
+
+  <div id="modal-paper-balance" class="modal-backdrop">
+    <div class="modal-box pb-box" role="dialog" aria-modal="true" aria-labelledby="pb-title">
+      <div class="card-header">
+        <div>
+          <h3 class="card-title" id="pb-title">Paper balance</h3>
+          <p class="card-sub" id="pb-wallet">—</p>
+        </div>
+        <button class="btn-icon" onclick="closeModal('modal-paper-balance')" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <div class="pb-unit" id="pb-unit" role="group" aria-label="Amount in">
+        <button type="button" data-unit="usd" onclick="setPaperUnit('usd')">USD</button><button type="button" data-unit="sol" onclick="setPaperUnit('sol')">SOL</button>
+      </div>
+      <label class="pb-field"><span id="pb-prefix">$</span><input id="pb-amount" type="number" min="0" step="any" inputmode="decimal" oninput="paperPreview()" onkeydown="if(event.key==='Enter') savePaperBalance()" /></label>
+      <div class="pb-preview mono" id="pb-preview"></div>
+      <div class="pb-chips" id="pb-chips"></div>
+      <p class="pb-note">Paper money only: what paper copies spend. It is never real funds.</p>
+      <div class="pb-actions">
+        <button class="btn" onclick="closeModal('modal-paper-balance')">Cancel</button>
+        <button class="btn btn-primary" onclick="savePaperBalance()">Set balance</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 6: DATE RANGE FILTER (For KPI Analytics Cards) -->
+  <div id="modal-date-filter" class="modal-backdrop">
+    <div class="modal-box date-filter-modal-box">
+      <!-- Main Content: Sidebar + Calendar Pane -->
+      <div class="df-layout">
+        <!-- Left Sidebar: Presets -->
+        <aside class="df-sidebar">
+          <div class="df-presets-list">
+            <button class="df-preset-btn active" data-preset="today" onclick="selectDatePreset('today')">Today</button>
+            <button class="df-preset-btn" data-preset="yesterday" onclick="selectDatePreset('yesterday')">Yesterday</button>
+            <button class="df-preset-btn" data-preset="last7" onclick="selectDatePreset('last7')">Last 7 days</button>
+            <button class="df-preset-btn" data-preset="last30" onclick="selectDatePreset('last30')">Last 30 days</button>
+            <button class="df-preset-btn" data-preset="ptd" onclick="selectDatePreset('ptd')">This month</button>
+            <button class="df-preset-btn" data-preset="quarters" onclick="selectDatePreset('quarters')">This quarter</button>
+            <button class="df-preset-btn" data-preset="all" onclick="selectDatePreset('all')">All time</button>
+            <button class="df-preset-btn" data-preset="custom" onclick="selectDatePreset('custom')">Custom range</button>
+          </div>
+        </aside>
+
+        <!-- Right Content: Top Inputs + Dual Calendars -->
+        <div class="df-main">
+          <!-- Dual Calendars Grid -->
+          <div class="df-calendars-row">
+            <!-- Calendar 1 (Left: Previous/Primary Month) -->
+            <div class="df-calendar" id="df-cal-1">
+              <div class="df-cal-header">
+                <button type="button" class="df-cal-nav-btn" onclick="navDateFilterMonth(-1)" title="Previous Month">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                </button>
+                <span class="df-cal-title" id="df-cal-title-1">September 2026</span>
+                <span class="df-cal-nav-spacer"></span>
+              </div>
+              <div class="df-weekdays-row">
+                <span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span>
+              </div>
+              <div class="df-days-grid" id="df-days-grid-1"></div>
+            </div>
+
+            <!-- Calendar 2 (Right: Next Month) -->
+            <div class="df-calendar" id="df-cal-2">
+              <div class="df-cal-header">
+                <span class="df-cal-nav-spacer"></span>
+                <span class="df-cal-title" id="df-cal-title-2">October 2026</span>
+                <button type="button" class="df-cal-nav-btn" onclick="navDateFilterMonth(1)" title="Next Month">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                </button>
+              </div>
+              <div class="df-weekdays-row">
+                <span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span>
+              </div>
+              <div class="df-days-grid" id="df-days-grid-2"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="df-footer">
+        <div class="df-footer-left">
+          <span class="df-footer-range-label" id="df-selected-range-label">All time</span>
+        </div>
+        <div class="df-footer-right">
+          <button type="button" class="btn btn-sm" onclick="closeModal('modal-date-filter')">Cancel</button>
+          <button type="button" class="btn btn-primary btn-sm" onclick="applyDateFilter()">Apply</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL 7: CONFIRM ACTION -->
+  <div id="modal-confirm" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <div class="modal-box modal-sm">
+      <div class="confirm-icon" id="confirm-icon"><svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
+      <h3 class="confirm-title" id="confirm-title">Are you sure?</h3>
+      <p class="confirm-msg" id="confirm-msg"></p>
+      <div class="modal-footer modal-footer-center">
+        <button class="btn" id="confirm-cancel">Cancel</button>
+        <button class="btn btn-danger" id="confirm-ok">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast-stack" class="toast-stack" aria-live="polite"></div>
+  <footer class="status-bar" id="status-bar" role="status" aria-live="polite">
+    <button type="button" class="sb-signout" onclick="logout()" title="Sign out" aria-label="Sign out"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg></button>
+    <span class="sb-item sb-chain" id="sb-chain" title="Solana"><svg width="15" height="12" viewBox="0 0 397.7 311.7" aria-hidden="true"><use href="#sol-mark"/></svg>Solana</span>
+    <span class="sb-sep"></span>
+    <span class="sb-item" id="sb-latency" title="Ping to your Solana RPC"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg><span class="mono" id="sb-latency-n">…</span></span>
+    <span class="sb-sep"></span>
+    <div class="sb-issues-wrap">
+      <button class="sb-item sb-issues is-clear" id="sb-issues" onclick="toggleIssuesPanel()" aria-haspopup="dialog" aria-expanded="false" title="Website bug checker"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg><span id="sb-issues-n">No issues</span></button>
+      <div class="issues-panel" id="issues-panel" role="dialog" aria-label="Website bug checker">
+        <div class="ip-head">
+          <div><strong>Bug checker</strong><span class="ip-sub" id="ip-sub">Checking…</span></div>
+          <div class="ip-actions"><button class="btn btn-sm" onclick="copyBugReport()">Copy report</button><button class="btn btn-sm" onclick="rerunChecks()">Run checks</button></div>
+        </div>
+        <div class="ip-list" id="ip-list"></div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/qr.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>

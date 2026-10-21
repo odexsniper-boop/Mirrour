@@ -1,0 +1,1258 @@
+/**
+ * Live Wallet Watcher — SIGNALS ONLY
+ *
+ * Watches real trader wallets on Solana and turns their on-chain swaps into buy/sell
+ * signals. It only READS public chain data (JSON-RPC) and token info (DexScreener).
+ * It never signs, never sends a transaction, and never touches a private key.
+ *
+ *   getSignaturesForAddress  →  getTransaction (jsonParsed)  →  parseSwapFromTransaction
+ *   →  enrich with DexScreener token info  →  onSignal(signal)
+ */
+
+import { WalletStream, looksLikeSwap, toWsUrl } from './walletStream.mjs';
+export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+export const QUOTE_MINTS = {
+  [WSOL_MINT]: 'SOL',
+  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: 'USDC',
+  Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB: 'USDT',
+};
+const LAMPORTS_PER_SOL = 1_000_000_000;
+const TOKEN_ACCOUNT_RENT_LAMPORTS = 2_039_280; // rent for a new SPL token account (refundable)
+const SOL_DUST = 0.0005; // ignore SOL moves smaller than fees/tips noise
+
+export const DEFAULT_SOLANA_RPC = 'https://api.mainnet-beta.solana.com';
+export const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+export const TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
+// A wallet whose newest 100 history entries span less than this is "flooded": other
+// people's bot transactions mention it so often that its own trades are buried.
+const FLOOD_WINDOW_SEC = 180;
+
+export function isSolanaAddress(addr) {
+  return typeof addr === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr);
+}
+
+function keyOf(k) {
+  return typeof k === 'string' ? k : k?.pubkey;
+}
+
+function uiAmount(tb) {
+  const t = tb?.uiTokenAmount;
+  if (!t) return 0;
+  if (t.amount !== undefined && t.decimals !== undefined) {
+    return Number(t.amount) / 10 ** Number(t.decimals);
+  }
+  return Number(t.uiAmountString ?? t.uiAmount ?? 0);
+}
+
+/**
+ * Pure function: given a `getTransaction` result (encoding jsonParsed) and the watched
+ * wallet, return the swap the wallet made, or `{ skip: reason }` if it wasn't a simple
+ * buy or sell against SOL / USDC / USDT.
+ */
+export function parseSwapFromTransaction(tx, wallet) {
+  if (!tx || !tx.meta || !tx.transaction) return { skip: 'no transaction data' };
+  if (tx.meta.err) return { skip: 'failed transaction' };
+
+  const keys = (tx.transaction.message?.accountKeys || []).map(keyOf);
+  const meta = tx.meta;
+
+  // --- Native SOL change for the wallet (fee added back if the wallet paid it)
+  let solDelta = 0;
+  const idx = keys.indexOf(wallet);
+  if (idx >= 0) {
+    const pre = Number(meta.preBalances?.[idx] ?? 0);
+    const post = Number(meta.postBalances?.[idx] ?? 0);
+    let lamports = post - pre;
+    if (idx === 0) lamports += Number(meta.fee || 0);
+    solDelta = lamports / LAMPORTS_PER_SOL;
+  }
+
+  // --- Token changes for accounts owned by the wallet, summed per mint
+  const deltas = new Map();
+  const preByIndex = new Map();
+  const preTotals = new Map(); // mint → wallet's balance before this tx (for partial sells)
+  for (const tb of meta.preTokenBalances || []) {
+    if (tb.owner === wallet) {
+      preByIndex.set(tb.accountIndex, tb);
+      preTotals.set(tb.mint, (preTotals.get(tb.mint) || 0) + uiAmount(tb));
+    }
+  }
+  let newTokenAccounts = 0;
+  const seen = new Set();
+  for (const tb of meta.postTokenBalances || []) {
+    if (tb.owner !== wallet) continue;
+    seen.add(tb.accountIndex);
+    const pre = preByIndex.get(tb.accountIndex);
+    if (!pre) newTokenAccounts += 1;
+    const d = uiAmount(tb) - (pre ? uiAmount(pre) : 0);
+    deltas.set(tb.mint, (deltas.get(tb.mint) || 0) + d);
+  }
+  for (const [accIdx, tb] of preByIndex) {
+    if (seen.has(accIdx)) continue; // account closed in this tx
+    deltas.set(tb.mint, (deltas.get(tb.mint) || 0) - uiAmount(tb));
+  }
+
+  // Wrapped SOL held in a token account counts as SOL
+  if (deltas.has(WSOL_MINT)) {
+    solDelta += deltas.get(WSOL_MINT);
+    deltas.delete(WSOL_MINT);
+  }
+
+  // balance before this tx per mint, to tell real moves from dust (some trading programs nudge
+  // a held token by a few billionths as a side effect)
+  const heldBefore = new Map();
+  for (const tb of preByIndex.values()) heldBefore.set(tb.mint, (heldBefore.get(tb.mint) || 0) + uiAmount(tb));
+  const stableMoves = [];
+  let tokenMoves = [];
+  for (const [mint, d] of deltas) {
+    if (Math.abs(d) < 1e-12) continue;
+    if (QUOTE_MINTS[mint]) stableMoves.push({ mint, symbol: QUOTE_MINTS[mint], delta: d });
+    else tokenMoves.push({ mint, delta: d, rel: Math.abs(d) / Math.max(Math.abs(d), heldBefore.get(mint) || 0) });
+  }
+  if (tokenMoves.length > 1) {
+    // ignore dust: under 0.01% of what was held, while another token really moved
+    const real = tokenMoves.filter((t) => t.rel >= 1e-4);
+    if (real.length >= 1) tokenMoves = real;
+  }
+
+  if (tokenMoves.length === 0) return { skip: 'no token bought or sold (transfer, stake or SOL/stable only)' };
+  if (tokenMoves.length > 1) {
+    const plus = tokenMoves.filter((t) => t.delta > 0).length;
+    const minus = tokenMoves.filter((t) => t.delta < 0).length;
+    return { skip: plus && minus ? 'token-to-token swap (not copied)' : 'multiple tokens moved' };
+  }
+
+  const tok = tokenMoves[0];
+  const side = tok.delta > 0 ? 'buy' : 'sell';
+
+  // Quote leg: a stablecoin moving the opposite way wins, otherwise SOL
+  let quote = null;
+  const stable = stableMoves.find((s) => (side === 'buy' ? s.delta < 0 : s.delta > 0));
+  if (stable) {
+    quote = { symbol: stable.symbol, mint: stable.mint, amount: Math.abs(stable.delta) };
+  } else {
+    let sol = solDelta;
+    // A buy that opened a brand-new token account also paid refundable rent; don't count it as spend
+    if (side === 'buy' && newTokenAccounts > 0) {
+      sol += (newTokenAccounts * TOKEN_ACCOUNT_RENT_LAMPORTS) / LAMPORTS_PER_SOL;
+    }
+    if ((side === 'buy' && sol < -SOL_DUST) || (side === 'sell' && sol > SOL_DUST)) {
+      quote = { symbol: 'SOL', mint: WSOL_MINT, amount: Math.abs(sol) };
+    }
+  }
+
+  if (!quote) {
+    return { skip: side === 'buy' ? 'tokens received without paying (airdrop or transfer in)' : 'tokens sent without receiving SOL/USDC (transfer out)' };
+  }
+
+  const before = preTotals.get(tok.mint) || 0;
+  const sellSharePct = side === 'sell' && before > 0 ? Math.min(100, (Math.abs(tok.delta) / before) * 100) : side === 'sell' ? 100 : null;
+
+  return {
+    side,
+    sellSharePct: sellSharePct === null ? null : Number(sellSharePct.toFixed(2)),
+    tokenMint: tok.mint,
+    tokenAmount: Math.abs(tok.delta),
+    quoteSymbol: quote.symbol,
+    quoteMint: quote.mint,
+    quoteAmount: quote.amount,
+    priceInQuote: quote.amount / Math.abs(tok.delta),
+    signature: tx.transaction.signatures?.[0] || null,
+    slot: tx.slot ?? null,
+    blockTime: tx.blockTime ? tx.blockTime * 1000 : null,
+  };
+}
+
+/**
+ * Token info (symbol, price, market cap, liquidity) from DexScreener, cached.
+ */
+export class TokenInfoService {
+  /**
+   * @param metadata optional AlchemyService: adds token image, name/symbol fallback and
+   *                 mint/freeze authority (when the provider returns them)
+   */
+  constructor({ fetchImpl = (...a) => fetch(...a), ttlMs = 60_000, fallbackSolPriceUsd = 150, metadata = null } = {}) {
+    this.fetch = fetchImpl;
+    this.metadata = metadata;
+    this.ttlMs = ttlMs;
+    this.cache = new Map();
+    this.fallbackSolPriceUsd = fallbackSolPriceUsd;
+  }
+
+  async get(mint) {
+    const hit = this.cache.get(mint);
+    if (hit && Date.now() - hit.at < this.ttlMs) return hit.info;
+    const metaPromise =
+      (this.metadata?.canFetchTokens ?? this.metadata?.enabled) && mint !== WSOL_MINT ? this.metadata.getSolanaToken(mint).catch(() => null) : Promise.resolve(null);
+    let info = null;
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 6000);
+      const res = await this.fetch(`https://api.dexscreener.com/latest/dex/tokens/${encodeURIComponent(mint)}`, {
+        headers: { Accept: 'application/json' },
+        signal: ctrl.signal,
+      });
+      clearTimeout(t);
+      if (res.ok) {
+        const data = await res.json();
+        const pairs = (Array.isArray(data?.pairs) ? data.pairs : []).filter(
+          (p) => p.chainId === 'solana' && p.baseToken?.address === mint
+        );
+        pairs.sort((a, b) => Number(b.liquidity?.usd || 0) - Number(a.liquidity?.usd || 0));
+        const p = pairs[0];
+        if (p) {
+          info = {
+            symbol: p.baseToken.symbol,
+            name: p.baseToken.name,
+            priceUsd: Number(p.priceUsd || 0) || null,
+            marketCapUsd: Number(p.marketCap || p.fdv || 0) || null,
+            liquidityUsd: Number(p.liquidity?.usd || 0) || null,
+            dexId: p.dexId || null,
+            pairUrl: p.url || null,
+            pairCreatedAt: p.pairCreatedAt || null,
+            imageUrl: typeof p.info?.imageUrl === 'string' && /^https:\/\//.test(p.info.imageUrl) ? p.info.imageUrl : null,
+          };
+        }
+      }
+    } catch {
+      // network error — fall through with null info
+    }
+    const meta = await metaPromise;
+    if (meta) {
+      info = {
+        ...(info || { priceUsd: null, marketCapUsd: null, liquidityUsd: null, dexId: null, pairUrl: null, pairCreatedAt: null }),
+        symbol: info?.symbol || meta.symbol || null,
+        name: info?.name || meta.name || null,
+        imageUrl: meta.imageUrl || info?.imageUrl || null,
+        authorityKnown: Boolean(meta.authorityKnown),
+        mintAuthority: meta.mintAuthority ?? null,
+        freezeAuthority: meta.freezeAuthority ?? null,
+        metadataSource: 'alchemy',
+      };
+    }
+    this.cache.set(mint, { at: Date.now(), info });
+    return info;
+  }
+
+  async solPriceUsd() {
+    const info = await this.get(WSOL_MINT);
+    return info?.priceUsd || this.fallbackSolPriceUsd;
+  }
+}
+
+class RpcError extends Error {
+  constructor(message, { rateLimited = false } = {}) {
+    super(message);
+    this.rateLimited = rateLimited;
+  }
+}
+
+/**
+ * Polls watched wallets for new signatures and emits parsed swap signals.
+ */
+const MIN_BALANCE_SIGNAL_USD = 1; // balance-mode moves worth less than this are dust / spam
+const MAX_BALANCE_MOVES_PER_POLL = 8;
+
+function withTimeout(promise, ms, message) {
+  let t;
+  return Promise.race([
+    promise.finally(() => clearTimeout(t)),
+    new Promise((_, reject) => {
+      t = setTimeout(() => {
+        const err = new Error(message);
+        err.budget = true; // still running in the background, not a failure
+        reject(err);
+      }, ms);
+      t.unref?.();
+    }),
+  ]);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms).unref?.());
+
+export function isFlooded(sigs, limit) {
+  if (!Array.isArray(sigs) || sigs.length < limit || limit < 25) return false;
+  const newest = sigs[0]?.blockTime;
+  const oldest = sigs[sigs.length - 1]?.blockTime;
+  if (!newest || !oldest) return false;
+  const span = newest - oldest;
+  if (span >= FLOOD_WINDOW_SEC) return false;
+  // A fast trader's own swaps mostly succeed; a flood is other bots' (mostly failed) spam,
+  // or volume no single trader produces (100 entries in under 20 seconds).
+  const failShare = sigs.filter((x) => x.err).length / sigs.length;
+  return failShare >= 0.5 || span < 20;
+}
+
+/**
+ * Pure: holdings snapshots → buys/sells. SOL and stablecoin changes are the payment leg;
+ * when several tokens moved in one interval the payment is split by their estimated value.
+ */
+export function diffHoldings(prev, now) {
+  const minRel = 0.001; // ignore <0.1% wiggles (rebases, dust)
+  const moves = [];
+  const mints = new Set([...prev.tokens.keys(), ...now.tokens.keys()]);
+  let solDelta = now.sol - prev.sol;
+  // Token accounts closed in this interval refunded their rent (~0.002 SOL each) and new ones
+  // cost it; neither is a trade payment.
+  const RENT = TOKEN_ACCOUNT_RENT_LAMPORTS / LAMPORTS_PER_SOL;
+  let closed = 0;
+  let opened = 0;
+  for (const m of prev.tokens.keys()) if (!now.tokens.has(m)) closed += 1;
+  for (const m of now.tokens.keys()) if (!prev.tokens.has(m)) opened += 1;
+  solDelta = solDelta - closed * RENT + opened * RENT;
+  const stable = {};
+  for (const mint of mints) {
+    const before = prev.tokens.get(mint) || 0;
+    const after = now.tokens.get(mint) || 0;
+    const d = after - before;
+    if (Math.abs(d) <= Math.max(before, after) * minRel || Math.abs(d) < 1e-12) continue;
+    if (mint === WSOL_MINT) {
+      solDelta += d;
+      continue;
+    }
+    if (QUOTE_MINTS[mint]) {
+      stable[QUOTE_MINTS[mint]] = (stable[QUOTE_MINTS[mint]] || 0) + d;
+      continue;
+    }
+    moves.push({
+      mint,
+      side: d > 0 ? 'buy' : 'sell',
+      tokenAmount: Math.abs(d),
+      sellSharePct: d < 0 ? Math.min(100, Number(((Math.abs(d) / before) * 100).toFixed(2))) : null,
+      before,
+    });
+  }
+  const buys = moves.filter((m) => m.side === 'buy');
+  const sells = moves.filter((m) => m.side === 'sell');
+  const stableOut = Object.entries(stable).find(([, v]) => v < 0);
+  const stableIn = Object.entries(stable).find(([, v]) => v > 0);
+  // Payment legs (only attributed when exactly one token moved that way; otherwise unknown)
+  if (buys.length === 1) {
+    if (stableOut) Object.assign(buys[0], { quoteSymbol: stableOut[0], quoteAmount: -stableOut[1] });
+    else if (solDelta < -SOL_DUST) Object.assign(buys[0], { quoteSymbol: 'SOL', quoteAmount: -solDelta + (sells.length ? 0 : 0) });
+  }
+  if (sells.length === 1) {
+    if (stableIn) Object.assign(sells[0], { quoteSymbol: stableIn[0], quoteAmount: stableIn[1] });
+    else if (solDelta > SOL_DUST) Object.assign(sells[0], { quoteSymbol: 'SOL', quoteAmount: solDelta });
+  }
+  if (buys.length > 1 && solDelta < -SOL_DUST) {
+    // several buys in one interval: mark them as paid (split later by token value)
+    for (const m of buys) Object.assign(m, { quoteSymbol: null, paidShare: true });
+  }
+  return moves;
+}
+
+export class SolanaWalletWatcher {
+  constructor({
+    rpcUrl = DEFAULT_SOLANA_RPC,
+    fetchImpl = (...a) => fetch(...a),
+    tokenInfo = null,
+    onSignal = () => {},
+    onStatus = () => {},
+    pollIntervalMs = 15_000,
+    backfillCount = 3,
+    maxTxPerWalletPerPoll = 60,
+    walletBudgetMs = 25_000,
+    stream = true,
+    WebSocketImpl = globalThis.WebSocket,
+    balanceWsUrl = process.env.SOLANA_BALANCE_WS_URL || 'wss://api.mainnet-beta.solana.com',
+    redactUrl = (x) => x,
+  } = {}) {
+    this.rpcUrl = rpcUrl;
+    this.fetch = fetchImpl;
+    this.tokenInfo = tokenInfo || new TokenInfoService({ fetchImpl });
+    this.onSignal = onSignal;
+    this.onStatus = onStatus;
+    this.pollIntervalMs = pollIntervalMs;
+    this.backfillCount = backfillCount;
+    this.maxTx = maxTxPerWalletPerPoll;
+    this.walletBudgetMs = walletBudgetMs;
+    this.wallets = new Map(); // address -> { address, label, lastSig, initialized, lastPollAt, error }
+    this.seenSigs = new Set();
+    this.spamSigs = new Set(); // opened transactions that were not signed by the watched wallet
+    this.maxRps = Number(process.env.ODEX_RPC_MAX_RPS || 15);
+    this.rpcTimes = [];
+    this.emittedSigs = new Map(); // signature → token mint, for trades that became signals
+    this.timer = null;
+    // Real-time path: pushed logs for every watched wallet (polling stays on as the safety net)
+    this.streamEnabled = Boolean(stream);
+    this.streamQueue = [];
+    this.streamActive = 0;
+    this.streamMaxConcurrent = 4;
+    this.streamStats = { swapsSeen: 0, notSwap: 0, failedTx: 0, signals: 0, lagMs: [] };
+    this.stream = new WalletStream({
+      url: toWsUrl(rpcUrl),
+      WebSocketImpl,
+      redactUrl,
+      onLogs: (address, ev) => this.handleStreamLogs(address, ev),
+      onAccount: (address, ev) => this.handleStreamAccount(address, ev),
+      onAccountUnsupported: (address) => {
+        this.useBalanceStream = true;
+        const w = this.wallets.get(address);
+        if (w && w.mode !== 'balances') {
+          w.mode = 'balances'; // it flooded the stream, so treat it as a flooded wallet
+          w.floodedAt = Date.now();
+        }
+        this.syncStreams();
+      },
+      onChange: () => this.emitStatus(),
+    });
+    // Second connection only for balance watching of spam-flooded wallets, used when the main
+    // provider has no accountSubscribe (Alchemy). It only triggers checks; trades are still
+    // read through the main RPC.
+    this.useBalanceStream = false;
+    this.balanceStream = new WalletStream({
+      url: balanceWsUrl,
+      WebSocketImpl,
+      redactUrl,
+      onAccount: (address, ev) => this.handleStreamAccount(address, ev),
+      onChange: () => this.emitStatus(),
+    });
+    this.running = false;
+    this.polling = false;
+    this.backoffMs = 0;
+    this.status = {
+      running: false,
+      rpcUrl: rpcUrl,
+      lastPollAt: null,
+      lastSuccessAt: null,
+      lastError: null,
+      rateLimited: false,
+      rpcCalls: 0,
+      txParsed: 0,
+      signalsEmitted: 0,
+      txSkipped: 0,
+      rpcMs: null,
+      skipReasons: {},
+      recentSkips: [],
+      nextPollInMs: null,
+    };
+  }
+
+  setRpcUrl(url) {
+    this.rpcUrl = url || DEFAULT_SOLANA_RPC;
+    this.status.rpcUrl = this.rpcUrl;
+    this.stream.setUrl(toWsUrl(this.rpcUrl));
+    this.emitStatus();
+  }
+
+  setPollInterval(ms) {
+    this.pollIntervalMs = Math.max(1_000, Number(ms) || 1_000);
+  }
+
+  /** Replace the watch list. Keeps progress for wallets already being watched. */
+  setWallets(list) {
+    const next = new Map();
+    for (const w of list) {
+      if (!isSolanaAddress(w.address)) continue;
+      const prev = this.wallets.get(w.address);
+      next.set(w.address, prev ? { ...prev, label: w.label || prev.label } : {
+        address: w.address,
+        label: w.label || null,
+        lastSig: null,
+        initialized: false,
+        lastPollAt: null,
+        error: null,
+        mode: 'history', // 'history' (parse its transactions) | 'balances' (diff its holdings)
+        holdings: null,
+      });
+    }
+    this.wallets = next;
+    this.syncStreams();
+    this.emitStatus();
+  }
+
+  /** Route each wallet to the right live feed: transactions (normal) or balance (flooded). */
+  syncStreams() {
+    const all = [...this.wallets.keys()];
+    const flooded = all.filter((a) => this.wallets.get(a)?.mode === 'balances');
+    const on = this.running && this.streamEnabled;
+    if (this.useBalanceStream) {
+      const normal = all.filter((a) => !flooded.includes(a));
+      for (const a of flooded) this.stream.accountMode.delete(a);
+      this.stream.setWallets(normal);
+      for (const a of flooded) this.balanceStream.accountMode.add(a);
+      for (const a of [...this.balanceStream.accountMode]) if (!flooded.includes(a)) this.balanceStream.accountMode.delete(a);
+      this.balanceStream.setWallets(flooded);
+      if (on && flooded.length) this.balanceStream.start();
+      else this.balanceStream.stop();
+    } else {
+      this.stream.setWallets(all);
+      // switch already-open subscriptions between transaction and balance watching
+      for (const a of flooded) this.stream.setBalanceWatch(a, true);
+      for (const a of [...this.stream.accountMode]) if (!flooded.includes(a)) this.stream.setBalanceWatch(a, false);
+      this.balanceStream.stop();
+    }
+    if (on) this.stream.start();
+    else this.stream.stop();
+  }
+
+  setStreamEnabled(on) {
+    this.streamEnabled = Boolean(on);
+    this.syncStreams();
+    this.emitStatus();
+  }
+
+  /** A pushed transaction that mentions a watched wallet. */
+  handleStreamLogs(address, ev) {
+    const w = this.wallets.get(address);
+    if (!w || !ev?.signature) return;
+    if (ev.err) {
+      this.streamStats.failedTx += 1; // failed transaction (spam floods are mostly these)
+      return;
+    }
+    if (this.seenSigs.has(ev.signature)) return;
+    if (!looksLikeSwap(ev.logs)) {
+      this.streamStats.notSwap += 1;
+      return;
+    }
+    this.streamStats.swapsSeen += 1;
+    this.streamQueue.push({ w, ev });
+    if (this.streamQueue.length > 200) this.streamQueue.splice(0, this.streamQueue.length - 200);
+    this.drainStream();
+  }
+
+  /**
+   * Spam-flooded wallet watched by balance: its SOL moved. Spam doesn't move it (dust is
+   * ignored); a real buy or sell does, so check that wallet right now instead of waiting.
+   */
+  handleStreamAccount(address, ev) {
+    const w = this.wallets.get(address);
+    if (!w || !Number.isFinite(ev?.lamports)) return;
+    const prev = w.streamLamports;
+    w.streamLamports = ev.lamports;
+    if (prev == null) return; // first value is the baseline
+    if (Math.abs(ev.lamports - prev) / LAMPORTS_PER_SOL < 0.005) return; // dust / fee noise
+    this.streamStats.balanceMoves = (this.streamStats.balanceMoves || 0) + 1;
+    this.fastCheck(w, ev.receivedAt || Date.now(), 0, Number.isFinite(ev.slot) ? ev.slot : null);
+  }
+
+  fastCheck(w, receivedAt, attempt = 0, slot = null) {
+    if (!this.running) return;
+    // Flooded wallet + we know the block the balance moved in: read just that block. Runs next
+    // to a slow backup check instead of waiting for it.
+    if (w.mode === 'balances' && slot != null && attempt === 0) {
+      this.slotCheck(w, slot, receivedAt).then(
+        (found) => {
+          if (found === null) this.fastCheck(w, receivedAt, 1); // block unreadable: old way
+        },
+        () => this.fastCheck(w, receivedAt, 1)
+      );
+      return;
+    }
+    if (w.busy) {
+      // a check is already running; look again right after it
+      if (attempt < 20) setTimeout(() => this.fastCheck(w, receivedAt, attempt + 1), 400).unref?.();
+      return;
+    }
+    w.busy = true;
+    const run = w.mode === 'balances' ? this.pollBalances(w, { via: 'stream', receivedAt }) : this.pollWallet(w, { via: 'stream', receivedAt });
+    run
+      .then((found) => {
+        if (found?.length) this.streamStats.signals += found.length;
+        // the RPC can lag the push by a moment: if nothing showed up yet, look once more
+        if (!found?.length && attempt === 0) setTimeout(() => this.fastCheck(w, receivedAt, 1), 1200).unref?.();
+      })
+      .catch((err) => {
+        w.error = err.message;
+      })
+      .finally(() => {
+        w.busy = false;
+        this.emitStatus();
+      });
+  }
+
+  drainStream() {
+    while (this.streamActive < this.streamMaxConcurrent && this.streamQueue.length) {
+      const { w, ev } = this.streamQueue.shift();
+      this.streamActive += 1;
+      this.processSignature(w, ev.signature, { backfill: false, via: 'stream', receivedAt: ev.receivedAt, waitForTx: true })
+        .then((sig) => {
+          if (sig) {
+            this.streamStats.signals += 1;
+            if (sig.streamMs != null) {
+              this.streamStats.lagMs.push(sig.streamMs);
+              if (this.streamStats.lagMs.length > 50) this.streamStats.lagMs.shift();
+            }
+          }
+        })
+        .catch((err) => {
+          // let the poller pick it up later
+          this.seenSigs.delete(ev.signature);
+          this.stream.fail(`could not read pushed trade: ${err.message}`);
+        })
+        .finally(() => {
+          this.streamActive -= 1;
+          this.drainStream();
+        });
+    }
+  }
+
+  getStatus() {
+    const lag = this.streamStats.lagMs;
+    return {
+      ...this.status,
+      running: this.running,
+      stream: {
+        ...this.stream.status(),
+        enabled: this.streamEnabled && this.running,
+        swapsSeen: this.streamStats.swapsSeen,
+        notSwap: this.streamStats.notSwap,
+        failedTx: this.streamStats.failedTx,
+        signals: this.streamStats.signals,
+        balanceMoves: this.streamStats.balanceMoves || 0,
+        blocksRead: this.streamStats.blocksRead || 0,
+        balanceFeed: this.useBalanceStream ? { ...this.balanceStream.status(), url: this.balanceStream.url } : null,
+        avgProcessMs: lag.length ? Math.round(lag.reduce((a, b) => a + b, 0) / lag.length) : null,
+      },
+      wallets: [...this.wallets.values()].map((w) => ({
+        address: w.address,
+        label: w.label,
+        initialized: w.initialized,
+        mode: w.mode || 'history',
+        tokenCount: w.tokenCount ?? null,
+        lastPollAt: w.lastPollAt,
+        error: w.error,
+        slowSince: w.slowSince || null,
+        lastMoveAt: w.lastMoveAt || null,
+      })),
+    };
+  }
+
+  emitStatus() {
+    try {
+      this.onStatus(this.getStatus());
+    } catch {
+      // ignore listener errors
+    }
+  }
+
+  /** Keep under the provider's requests-per-second limit (Alchemy free tier ≈ 25/s). */
+  async throttle() {
+    const max = this.maxRps;
+    if (!max) return;
+    for (;;) {
+      const now = Date.now();
+      while (this.rpcTimes.length && now - this.rpcTimes[0] >= 1000) this.rpcTimes.shift();
+      if (this.rpcTimes.length < max) {
+        this.rpcTimes.push(now);
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 1000 - (now - this.rpcTimes[0]) + 5));
+    }
+  }
+
+  /** RPC call; a 429 (rate limited) is retried a few times with growing pauses. */
+  async rpc(method, params) {
+    for (let attempt = 0; ; attempt++) {
+      await this.throttle();
+      try {
+        return await this.rpcOnce(method, params);
+      } catch (err) {
+        if (!err.rateLimited || attempt >= 3) throw err;
+        await new Promise((r) => setTimeout(r, 500 * 2 ** attempt + Math.random() * 200));
+      }
+    }
+  }
+
+  async rpcOnce(method, params) {
+    this.status.rpcCalls += 1;
+    const ctrl = new AbortController();
+    // Token-account listings of spam-flooded wallets can be several MB: give them more time
+    const t = setTimeout(() => ctrl.abort(), method === 'getTokenAccountsByOwner' ? 30_000 : 10_000);
+    let res;
+    const startedAt = Date.now();
+    try {
+      res = await this.fetch(this.rpcUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: this.status.rpcCalls, method, params }),
+        signal: ctrl.signal,
+      });
+    } catch (err) {
+      throw new RpcError(`RPC unreachable (${err.name === 'AbortError' ? 'timeout' : err.message})`);
+    } finally {
+      clearTimeout(t);
+    }
+    // round-trip time of light calls (heavy token-account listings would skew it)
+    if (res.ok && (method === 'getSignaturesForAddress' || method === 'getBalance' || method === 'getTransaction')) {
+      const ms = Date.now() - startedAt;
+      this.status.rpcMs = this.status.rpcMs ? Math.round(this.status.rpcMs * 0.7 + ms * 0.3) : ms;
+    }
+    if (res.status === 429) throw new RpcError('RPC rate limit (429) — slowing down', { rateLimited: true });
+    if (!res.ok) throw new RpcError(`RPC HTTP ${res.status}`);
+    const json = await res.json();
+    if (json.error) {
+      const rate = json.error.code === 429 || /rate|too many/i.test(json.error.message || '');
+      throw new RpcError(`RPC error: ${json.error.message || json.error.code}`, { rateLimited: rate });
+    }
+    return json.result;
+  }
+
+  /**
+   * Fetch a transaction in any format. Solana now has version 1 transactions; asking for
+   * version 0 only makes the RPC refuse them (error -32015), which silently hid trades.
+   * Request the newest version we parse, and fall back if an older RPC rejects that.
+   */
+  async getTransaction(sig) {
+    const versions = this.txVersion != null ? [this.txVersion] : [1, 0];
+    let lastErr = null;
+    for (const v of versions) {
+      try {
+        const tx = await this.rpc('getTransaction', [sig, { encoding: 'jsonParsed', maxSupportedTransactionVersion: v, commitment: 'confirmed' }]);
+        if (this.txVersion == null) this.txVersion = v;
+        return tx;
+      } catch (err) {
+        lastErr = err;
+        if (err.rateLimited) throw err;
+        // -32015 "version not supported" for this tx → nothing older will work either
+        if (/version \(\d+\) is not supported/i.test(err.message)) throw err;
+      }
+    }
+    throw lastErr;
+  }
+
+  async processSignature(w, sig, { backfill, via = 'poll', receivedAt = null, waitForTx = false, tx: knownTx = null }) {
+    if (this.seenSigs.has(sig)) return null;
+    this.seenSigs.add(sig);
+    if (this.seenSigs.size > 5000) this.seenSigs = new Set([...this.seenSigs].slice(-2500));
+
+    let tx = knownTx || (await this.getTransaction(sig));
+    // A pushed trade can arrive a moment before the RPC can serve it: retry briefly (~2 s)
+    for (let i = 0; waitForTx && !tx && i < 6; i++) {
+      await new Promise((r) => setTimeout(r, 200 + i * 100));
+      tx = await this.getTransaction(sig);
+    }
+    this.status.txParsed += 1;
+    const swap = parseSwapFromTransaction(tx, w.address);
+    if (!swap || swap.skip) {
+      const reason = swap?.skip || 'transaction not found';
+      this.status.txSkipped += 1;
+      this.status.skipReasons[reason] = (this.status.skipReasons[reason] || 0) + 1;
+      this.status.recentSkips.unshift({ signature: sig, wallet: w.address, label: w.label, reason, at: Date.now() });
+      this.status.recentSkips.length = Math.min(this.status.recentSkips.length, 15);
+      return null;
+    }
+
+    const [info, solPrice] = await Promise.all([this.tokenInfo.get(swap.tokenMint), this.tokenInfo.solPriceUsd()]);
+    const quoteUsd = swap.quoteSymbol === 'SOL' ? solPrice : 1;
+    const usdValue = swap.quoteAmount * quoteUsd;
+    const txPriceUsd = swap.priceInQuote * quoteUsd;
+
+    const signal = {
+      id: `sig-${sig.slice(0, 12)}`,
+      chainId: 'solana',
+      wallet: w.address,
+      label: w.label,
+      side: swap.side,
+      tokenMint: swap.tokenMint,
+      symbol: info?.symbol || `${swap.tokenMint.slice(0, 4)}…${swap.tokenMint.slice(-4)}`,
+      name: info?.name || null,
+      tokenAmount: swap.tokenAmount,
+      sellSharePct: swap.sellSharePct,
+      quoteSymbol: swap.quoteSymbol,
+      quoteAmount: swap.quoteAmount,
+      usdValue,
+      txPriceUsd,
+      currentPriceUsd: info?.priceUsd || null,
+      marketCapUsd: info?.marketCapUsd || null,
+      liquidityUsd: info?.liquidityUsd || null,
+      dexId: info?.dexId || null,
+      pairCreatedAt: info?.pairCreatedAt || null,
+      pairUrl: info?.pairUrl || null,
+      imageUrl: info?.imageUrl || null,
+      authorityKnown: Boolean(info?.authorityKnown),
+      mintAuthority: info?.mintAuthority ?? null,
+      freezeAuthority: info?.freezeAuthority ?? null,
+      signature: sig,
+      explorerUrl: `https://solscan.io/tx/${sig}`,
+      blockTime: swap.blockTime,
+      detectedAt: Date.now(),
+      latencySec: swap.blockTime ? Math.max(0, Math.round((Date.now() - swap.blockTime) / 1000)) : null,
+      via,
+      streamMs: receivedAt ? Date.now() - receivedAt : null, // push received → signal ready
+      backfill: Boolean(backfill),
+    };
+    this.emittedSigs.set(sig, swap.tokenMint);
+    if (this.emittedSigs.size > 3000) this.emittedSigs = new Map([...this.emittedSigs].slice(-1500));
+    this.status.signalsEmitted += 1;
+    try {
+      await this.onSignal(signal);
+    } catch {
+      // ignore listener errors
+    }
+    return signal;
+  }
+
+  /**
+   * Read-only check of a wallet's recent history: how many of its last N transactions are
+   * buys/sells this app can copy, and why the rest were ignored. Nothing is stored.
+   */
+  async checkWallet(address, { limit = 25 } = {}) {
+    const probe = (await this.rpc('getSignaturesForAddress', [address, { limit: 100, commitment: 'confirmed' }])) || [];
+    if (isFlooded(probe, 100)) {
+      const h = await this.getHoldings(address);
+      const spanSec = Math.max(1, probe[0].blockTime - probe[probe.length - 1].blockTime);
+      return {
+        address,
+        verdict: 'busy',
+        mode: 'balances',
+        checked: probe.length,
+        failed: probe.filter((x) => x.err).length,
+        txPerMinute: Math.round((probe.length / spanSec) * 60),
+        solBalance: h.sol,
+        tokensHeld: [...h.tokens.values()].filter((v) => v > 0).length,
+        swaps: [],
+        swapCount: 0,
+        buys: 0,
+        sells: 0,
+        ignored: {},
+        newestTxAt: probe[0].blockTime * 1000,
+        lastSwapAt: null,
+      };
+    }
+    const sigs = probe.slice(0, Math.min(50, Math.max(1, limit)));
+    const swaps = [];
+    const ignored = {};
+    let failed = 0;
+    for (const s of sigs) {
+      if (s.err) {
+        failed += 1;
+        continue;
+      }
+      let tx = null;
+      try {
+        tx = await this.getTransaction(s.signature);
+      } catch (err) {
+        if (err.rateLimited) throw err;
+        ignored['could not be read'] = (ignored['could not be read'] || 0) + 1;
+        continue;
+      }
+      const swap = parseSwapFromTransaction(tx, address);
+      if (swap && !swap.skip) {
+        swaps.push({ side: swap.side, tokenMint: swap.tokenMint, quoteSymbol: swap.quoteSymbol, quoteAmount: swap.quoteAmount, blockTime: swap.blockTime, signature: s.signature });
+      } else {
+        const r = swap?.skip || 'transaction not found';
+        ignored[r] = (ignored[r] || 0) + 1;
+      }
+    }
+    const newest = sigs[0]?.blockTime ? sigs[0].blockTime * 1000 : null;
+    const lastSwapAt = swaps[0]?.blockTime || null;
+    let verdict = 'copyable';
+    if (!sigs.length) verdict = 'inactive';
+    else if (!swaps.length) verdict = 'no_swaps';
+    return {
+      address,
+      verdict,
+      checked: sigs.length,
+      failed,
+      swaps: swaps.slice(0, 10),
+      swapCount: swaps.length,
+      buys: swaps.filter((x) => x.side === 'buy').length,
+      sells: swaps.filter((x) => x.side === 'sell').length,
+      ignored,
+      newestTxAt: newest,
+      lastSwapAt,
+    };
+  }
+
+  async pollWallet(w, fast = null) {
+    if (w.mode === 'balances') return this.pollBalances(w, fast);
+    const initial = !w.initialized;
+    // 100 per poll so a busy wallet can't make more trades between polls than we read
+    const opts = { limit: 100, commitment: 'confirmed' };
+    if (!initial && w.lastSig) opts.until = w.lastSig;
+    const sigs = (await this.rpc('getSignaturesForAddress', [w.address, opts])) || [];
+    w.lastPollAt = Date.now();
+    w.error = null;
+    if (sigs.length) w.lastSig = sigs[0].signature;
+    w.initialized = true;
+
+    // Flooded wallet (or more new entries than one poll can read): switch to balance tracking
+    if (isFlooded(sigs, opts.limit)) {
+      w.mode = 'balances';
+      w.floodedAt = Date.now();
+      this.syncStreams();
+      return this.pollBalances(w, fast);
+    }
+
+    // Oldest first, successful only, capped per poll; first poll only backfills a few
+    let todo = sigs.filter((x) => !x.err);
+    if (initial) todo = todo.slice(0, Math.max(1, this.backfillCount));
+    todo = todo.slice(0, this.maxTx).reverse();
+    const out = [];
+    for (const x of todo) {
+      const sig = await this.processSignature(w, x.signature, { backfill: initial, via: fast?.via || 'poll', receivedAt: fast?.receivedAt || null });
+      if (sig) out.push(sig);
+    }
+    return out;
+  }
+
+  /**
+   * Token + SOL holdings of a wallet (both token programs), summed per mint.
+   * A listing that fails must never look like "the wallet sold everything": for a failed
+   * program the previous snapshot's part is reused, and with no previous part the whole
+   * read fails (so nothing is diffed against a half-empty snapshot).
+   */
+  async getHoldings(address, prev = null) {
+    const list = (programId) => this.rpc('getTokenAccountsByOwner', [address, { programId }, { encoding: 'jsonParsed', commitment: 'confirmed' }]);
+    const [solR, splR, t22R] = await Promise.allSettled([this.rpc('getBalance', [address, { commitment: 'confirmed' }]), list(TOKEN_PROGRAM), list(TOKEN_2022_PROGRAM)]);
+    if (solR.status === 'rejected') throw solR.reason;
+    const parts = {};
+    const partial = [];
+    for (const [key, r] of [['spl', splR], ['t22', t22R]]) {
+      if (r.status === 'fulfilled' && Array.isArray(r.value?.value)) {
+        const tokens = new Map();
+        const accounts = new Map();
+        for (const acc of r.value.value) {
+          const info = acc?.account?.data?.parsed?.info;
+          if (!info?.mint) continue;
+          tokens.set(info.mint, (tokens.get(info.mint) || 0) + uiAmount({ uiTokenAmount: info.tokenAmount }));
+          if (acc.pubkey) accounts.set(info.mint, [...(accounts.get(info.mint) || []), acc.pubkey]);
+        }
+        parts[key] = { tokens, accounts };
+      } else if (prev?.parts?.[key]) {
+        parts[key] = prev.parts[key]; // keep last known: no fake "sold everything"
+        partial.push(key);
+      } else {
+        const why = r.status === 'rejected' ? r.reason?.message : 'bad response';
+        throw new RpcError(`could not read ${key === 'spl' ? 'SPL' : 'Token-2022'} token accounts (${why})`, { rateLimited: Boolean(r.reason?.rateLimited) });
+      }
+    }
+    const tokens = new Map();
+    const accounts = new Map();
+    for (const part of Object.values(parts)) {
+      for (const [m, v] of part.tokens) tokens.set(m, (tokens.get(m) || 0) + v);
+      for (const [m, a] of part.accounts) accounts.set(m, [...(accounts.get(m) || []), ...a]);
+    }
+    const sol = solR.value;
+    const lamports = typeof sol === 'number' ? sol : Number(sol?.value || 0);
+    return { sol: lamports / LAMPORTS_PER_SOL, tokens, accounts, parts, partial, at: Date.now() };
+  }
+
+  /** SOL + USDC of a wallet (cheap: no full token listing). */
+  async getPaymentBalances(address) {
+    const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+    const [sol, usdcAccs] = await Promise.all([
+      this.rpc('getBalance', [address, { commitment: 'confirmed' }]),
+      this.rpc('getTokenAccountsByOwner', [address, { mint: USDC }, { encoding: 'jsonParsed', commitment: 'confirmed' }]).catch(() => null),
+    ]);
+    const lamports = typeof sol === 'number' ? sol : Number(sol?.value || 0);
+    let usdc = null;
+    if (usdcAccs && Array.isArray(usdcAccs.value)) {
+      usdc = 0;
+      for (const a of usdcAccs.value) {
+        const info = a?.account?.data?.parsed?.info;
+        if (info?.mint === USDC) usdc += uiAmount({ uiTokenAmount: info.tokenAmount });
+      }
+    }
+    return { sol: lamports / LAMPORTS_PER_SOL, usdc };
+  }
+
+  /**
+   * The balance feed says this flooded wallet's SOL moved in `slot`. Read that one block
+   * (transaction list with account keys only) and keep the transactions the wallet signed:
+   * one request instead of opening hundreds of spam transactions.
+   * Returns the signals found, or null when the block could not be read.
+   */
+  async slotCheck(w, slot, receivedAt) {
+    if (!w.slotsChecked) w.slotsChecked = new Set();
+    if (w.slotsChecked.has(slot)) return [];
+    w.slotsChecked.add(slot);
+    if (w.slotsChecked.size > 200) w.slotsChecked = new Set([...w.slotsChecked].slice(-100));
+    w.lastMoveAt = Date.now();
+    let block = null;
+    for (let attempt = 0; attempt < 10 && this.running; attempt++) {
+      try {
+        block = await this.rpc('getBlock', [slot, { encoding: 'json', transactionDetails: 'accounts', maxSupportedTransactionVersion: 0, rewards: false, commitment: 'confirmed' }]);
+        if (block) break;
+        if (attempt >= 1) return null; // an empty answer (not 'not available yet'): this RPC can't serve it
+      } catch (err) {
+        if (/skipped|missing in long-term storage|-32007|-32009/i.test(err.message)) return null;
+        if (err.rateLimited && attempt >= 3) return null;
+      }
+      await sleep(attempt < 4 ? 400 : 800); // a just-confirmed block can take a moment to be served
+    }
+    if (!block?.transactions) return null;
+    this.streamStats.blocksRead = (this.streamStats.blocksRead || 0) + 1;
+    const own = [];
+    for (const t of block.transactions) {
+      if (t?.meta?.err) continue;
+      const keys = t?.transaction?.accountKeys || [];
+      if (!keys.some((k) => k && k.pubkey === w.address && k.signer)) continue;
+      const sig = t.transaction.signatures?.[0];
+      if (sig && !this.seenSigs.has(sig)) own.push(sig);
+    }
+    const out = [];
+    for (const sig of own) {
+      const found = await this.processSignature(w, sig, { backfill: false, via: 'stream', receivedAt, waitForTx: true });
+      if (found) {
+        found.source = 'balances-verified';
+        out.push(found);
+      }
+    }
+    if (out.length) {
+      this.streamStats.signals += out.length;
+      w.lastSlotTradeAt = Date.now();
+    } else if (!own.length) {
+      this.noteSkip(w, `slot-${slot}`, 'balance changed but no trade signed by this wallet (transfer in/out)');
+    }
+    return out;
+  }
+
+  /** Is the live balance feed watching this wallet right now? */
+  balanceFeedLive(w) {
+    if (!this.running || !this.streamEnabled) return false;
+    const feed = this.useBalanceStream ? this.balanceStream : this.stream;
+    const st = feed.status();
+    return Boolean(st.connected && feed.subs?.has(w.address) && feed.accountMode?.has(w.address) && Date.now() - (st.connectedAt || Date.now()) > 5000);
+  }
+
+  /**
+   * Spam-flooded wallet ("balance mode"). Spammers can flood a wallet with transactions and
+   * junk tokens, but they cannot move its SOL / USDC or sign as it. So:
+   *  1. read SOL + USDC (cheap); unchanged → nothing happened, just remember where we are
+   *  2. changed → read only the new signatures since last time, open the few successful ones,
+   *     and keep the transactions this wallet signed itself → those are its real trades.
+   */
+  async pollBalances(w, fast = null) {
+    // Every 5 minutes, check whether the flood stopped; if so go back to exact transaction reading
+    if (w.floodedAt && Date.now() - (w.floodCheckAt || w.floodedAt) > 300_000) {
+      w.floodCheckAt = Date.now();
+      const probe = (await this.rpc('getSignaturesForAddress', [w.address, { limit: 100, commitment: 'confirmed' }])) || [];
+      if (!isFlooded(probe, 100)) {
+        w.mode = 'history';
+        w.floodedAt = null;
+        w.flood = null;
+        if (probe.length) w.lastSig = probe[0].signature; // continue from now, no backfill
+        this.syncStreams();
+        return [];
+      }
+    }
+    // newest signature first, then balances: a trade that lands in between still shows as a move
+    const head = (await this.rpc('getSignaturesForAddress', [w.address, { limit: 1, commitment: 'confirmed' }])) || [];
+    const bal = await this.getPaymentBalances(w.address);
+    w.lastPollAt = Date.now();
+    w.error = null;
+    w.initialized = true;
+    const newest = head[0]?.signature || null;
+    const prev = w.flood;
+    if (!prev) {
+      w.flood = { sol: bal.sol, usdc: bal.usdc, seenSol: bal.sol, seenUsdc: bal.usdc, lastSig: newest, misses: 0, at: Date.now() };
+      return []; // baseline
+    }
+    // moved vs the last confirmed baseline, or vs the last value we saw (a buy then a sell can
+    // bring SOL back to where it was)
+    const d = (a, b) => (a != null && b != null ? Math.abs(a - b) : 0);
+    const moved = d(bal.sol, prev.sol) >= 0.005 || d(bal.sol, prev.seenSol) >= 0.005 || d(bal.usdc, prev.usdc) >= 0.5 || d(bal.usdc, prev.seenUsdc) >= 0.5;
+    if (!moved && !prev.misses) {
+      w.flood = { ...prev, sol: bal.sol, usdc: bal.usdc ?? prev.usdc, seenSol: bal.sol, seenUsdc: bal.usdc, lastSig: newest || prev.lastSig };
+      return [];
+    }
+    // The live feed watches this wallet: each move was already read from its own block, so the
+    // slow full scan is only a backup for a move the feed did not report.
+    if (moved && !prev.misses && this.balanceFeedLive(w)) {
+      const seenByFeed = (w.lastMoveAt || 0) >= (prev.at || 0);
+      if (seenByFeed || !prev.waitedAt) {
+        w.flood = seenByFeed
+          ? { sol: bal.sol, usdc: bal.usdc ?? prev.usdc, seenSol: bal.sol, seenUsdc: bal.usdc, lastSig: newest || prev.lastSig, misses: 0, at: Date.now() }
+          : { ...prev, waitedAt: Date.now() }; // the push may simply not have arrived yet
+        return [];
+      }
+    }
+    const out = await this.scanOwnTransactions(w, prev.lastSig, fast);
+    if (out.length || (prev.misses || 0) >= 3) {
+      if (!out.length) this.noteSkip(w, `bal-${Date.now()}`, 'balance changed but no trade signed by this wallet (transfer in/out)');
+      w.flood = { sol: bal.sol, usdc: bal.usdc ?? prev.usdc, seenSol: bal.sol, seenUsdc: bal.usdc, lastSig: newest || prev.lastSig, misses: 0, at: Date.now() };
+    } else {
+      // the RPC may not list the trade yet: keep the scan start and look again next time
+      w.flood = { ...prev, seenSol: bal.sol, seenUsdc: bal.usdc, misses: (prev.misses || 0) + 1 };
+    }
+    return out;
+  }
+
+  /** Read every signature newer than `untilSig`, keep successful transactions signed by the wallet. */
+  async scanOwnTransactions(w, untilSig, fast = null) {
+    const MAX_PAGES = 20; // 20k signatures ≈ a minute of a 300 tx/s spam flood
+    const ok = [];
+    let before;
+    let pages = 0;
+    let capped = false;
+    for (;;) {
+      const page = (await this.rpc('getSignaturesForAddress', [w.address, { limit: 1000, commitment: 'confirmed', ...(untilSig ? { until: untilSig } : {}), ...(before ? { before } : {}) }])) || [];
+      pages += 1;
+      for (const x of page) if (!x.err && !this.seenSigs.has(x.signature) && !this.spamSigs.has(x.signature)) ok.push(x.signature);
+      if (page.length < 1000 || !untilSig) break;
+      if (pages >= MAX_PAGES) {
+        capped = true;
+        break;
+      }
+      before = page[page.length - 1].signature;
+    }
+    if (capped) this.noteSkip(w, `scan-${Date.now()}`, 'too much spam between checks to read every transaction (oldest skipped)');
+    this.status.floodScanned = (this.status.floodScanned || 0) + ok.length;
+    // open successful ones (oldest first), a few at a time; only the wallet's own count
+    const todo = ok.reverse().slice(-300);
+    const out = [];
+    for (let i = 0; i < todo.length; i += 4) {
+      const batch = todo.slice(i, i + 4);
+      const txs = await Promise.all(batch.map((sig) => this.getTransaction(sig).catch(() => null)));
+      for (let k = 0; k < batch.length; k++) {
+        const tx = txs[k];
+        const keys = tx?.transaction?.message?.accountKeys || [];
+        const signedByWallet = keys.some((key) => (typeof key === 'string' ? false : key.pubkey === w.address && key.signer));
+        if (!signedByWallet) {
+          if (tx) this.spamSigs.add(batch[k]); // spam sent by someone else: never open it again
+          continue;
+        }
+        const sig = await this.processSignature(w, batch[k], { backfill: false, via: fast?.via || 'poll', receivedAt: fast?.receivedAt || null, tx });
+        if (sig) {
+          sig.source = 'balances-verified';
+          out.push(sig);
+        }
+      }
+    }
+    if (this.spamSigs.size > 20000) this.spamSigs = new Set([...this.spamSigs].slice(-10000));
+    return out;
+  }
+
+  noteSkip(w, sig, reason) {
+    this.status.txSkipped += 1;
+    this.status.skipReasons[reason] = (this.status.skipReasons[reason] || 0) + 1;
+    this.status.recentSkips.unshift({ signature: sig, wallet: w.address, label: w.label, reason, at: Date.now() });
+    this.status.recentSkips.length = Math.min(this.status.recentSkips.length, 15);
+  }
+
+  buildSignal(w, swap, info, { signature, explorerUrl, source = 'history', backfill = false }) {
+    return {
+      id: `sig-${String(signature).slice(0, 24)}`,
+      chainId: 'solana',
+      wallet: w.address,
+      label: w.label,
+      side: swap.side,
+      tokenMint: swap.tokenMint,
+      symbol: info?.symbol || `${swap.tokenMint.slice(0, 4)}…${swap.tokenMint.slice(-4)}`,
+      name: info?.name || null,
+      tokenAmount: swap.tokenAmount,
+      sellSharePct: swap.sellSharePct ?? null,
+      quoteSymbol: swap.quoteSymbol,
+      quoteAmount: swap.quoteAmount,
+      usdValue: swap.usdValue ?? null,
+      txPriceUsd: swap.txPriceUsd,
+      currentPriceUsd: info?.priceUsd || null,
+      marketCapUsd: info?.marketCapUsd || null,
+      liquidityUsd: info?.liquidityUsd || null,
+      dexId: info?.dexId || null,
+      pairCreatedAt: info?.pairCreatedAt || null,
+      pairUrl: info?.pairUrl || null,
+      imageUrl: info?.imageUrl || null,
+      authorityKnown: Boolean(info?.authorityKnown),
+      mintAuthority: info?.mintAuthority ?? null,
+      freezeAuthority: info?.freezeAuthority ?? null,
+      signature,
+      explorerUrl,
+      source,
+      blockTime: swap.blockTime,
+      detectedAt: Date.now(),
+      latencySec: swap.blockTime ? Math.max(0, Math.round((Date.now() - swap.blockTime) / 1000)) : null,
+      backfill: Boolean(backfill),
+    };
+  }
+
+  async emitSignal(signal) {
+    this.status.signalsEmitted += 1;
+    try {
+      await this.onSignal(signal);
+    } catch {
+      // ignore listener errors
+    }
+  }
+
+  /** One pass over every watched wallet. Safe to call manually ("Poll now"). */
+  async pollOnce() {
+    if (this.polling) return [];
+    this.polling = true;
+    this.status.lastPollAt = Date.now();
+    const found = [];
+    let hadError = null;
+    try {
+      // Every wallet is checked in parallel, each with a time budget, so one slow or noisy
+      // wallet can never stop the others from being read.
+      const jobs = [...this.wallets.values()].map(async (w) => {
+        if (w.busy) return; // its previous check is still running
+        w.busy = true;
+        // 'busy' clears when the check really ends, so a slow check is never run twice at once
+        const started = Date.now();
+        const inner = this.pollWallet(w)
+          .then(
+            (r) => {
+              w.slowSince = null;
+              return r;
+            },
+            (err) => {
+              w.slowSince = null;
+              w.error = err.message; // a check that fails after its budget still reports why
+              throw err;
+            }
+          )
+          .finally(() => {
+            w.busy = false;
+          });
+        inner.catch(() => {});
+        try {
+          const res = await withTimeout(inner, this.walletBudgetMs, `check of ${w.label || w.address.slice(0, 6)} took too long`);
+          found.push(...res);
+        } catch (err) {
+          if (err.budget) {
+            // slow (a spam-flooded wallet): it keeps running and its trades are still copied
+            w.slowSince = w.slowSince || started;
+            return;
+          }
+          w.error = err.message;
+          if (!hadError || err.rateLimited) hadError = err;
+        }
+      });
+      await Promise.all(jobs);
+    } finally {
+      this.polling = false;
+    }
+    if (hadError) {
+      this.status.lastError = hadError.message;
+      this.status.rateLimited = Boolean(hadError.rateLimited);
+      this.backoffMs = hadError.rateLimited ? Math.min(120_000, (this.backoffMs || this.pollIntervalMs) * 2) : this.backoffMs;
+    } else {
+      this.status.lastError = null;
+      this.status.rateLimited = false;
+      this.status.lastSuccessAt = Date.now();
+      this.backoffMs = 0;
+    }
+    this.emitStatus();
+    return found;
+  }
+
+  start() {
+    if (this.running) return;
+    this.running = true;
+    const loop = async () => {
+      if (!this.running) return;
+      if (this.wallets.size) await this.pollOnce();
+      if (!this.running) return;
+      const wait = this.pollIntervalMs + this.backoffMs;
+      this.status.nextPollInMs = wait;
+      this.timer = setTimeout(loop, wait);
+    };
+    this.timer = setTimeout(loop, 250);
+    this.syncStreams();
+    this.emitStatus();
+  }
+
+  stop() {
+    this.running = false;
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+    this.status.nextPollInMs = null;
+    this.stream.stop();
+    this.balanceStream.stop();
+    this.emitStatus();
+  }
+}

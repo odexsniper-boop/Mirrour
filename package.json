@@ -1,0 +1,15 @@
+{
+  "name": "odex-mirror",
+  "version": "1.0.0",
+  "description": "Odex Mirror — Solana copy-trading web terminal (paper trades from real wallet swaps)",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "dev": "node --watch server.mjs",
+    "test": "node --test test/engine.test.mjs test/engine-behaviour.test.mjs test/wallet-watcher.test.mjs test/live-signals.test.mjs test/alchemy.test.mjs test/database.test.mjs test/onchain-meta.test.mjs test/wallet-stream.test.mjs test/pump-curve.test.mjs test/pnl-accuracy.test.mjs test/real-trader.test.mjs"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}

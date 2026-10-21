@@ -1,0 +1,115 @@
+// PnL accuracy: paper copies never fill below the trader, and every fee is counted in PnL.
+// Run: node --test test/pnl-accuracy.test.mjs
+process.env.ODEX_RPC_MAX_RPS = '0';
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { CopyTradingEngine, createDefaultExitRules } from '../engine/copyEngine.mjs';
+
+let seq = 0;
+function setup() {
+  const e = new CopyTradingEngine();
+  e.resetToCleanState();
+  e.settings.paperTrading = true;
+  e.settings.cooldown.enabled = false;
+  e.settings.tradingAsset.solana = 'native'; // pays SOL gas, like the real setup
+  const f = {
+    id: `fol-${++seq}`, walletId: e.getActiveWallet().id, name: 't', handle: 't',
+    traderWallet: '498g1rVnFcnjBjpfw1xyqA1WvgQXUU8RWuELjxkjAayQ', chainId: 'solana', status: 'copying',
+    pauseReason: null, mode: 'buy-hold', sizing: { type: 'fixed', amount: 50 }, tpPct: null, slPct: null,
+    minTradeUsd: 1, maxOpenPositions: 100, maxAtRiskUsd: 10000, consecutiveLosses: 0,
+    exitRules: createDefaultExitRules(), filtersOverride: {}, createdAt: Date.now(),
+  };
+  e.follows.unshift(f);
+  return { e, f };
+}
+const sig = (f, token) => ({
+  chainId: 'solana', side: 'buy', traderHandle: f.handle, traderWallet: f.traderWallet, traderBuyUsd: 100,
+  token: { symbol: 'X', name: 'X', isLaunchpad: true, stage: 'pre-grad', marketCapUsd: 50_000, safety: { safetyVerified: true }, ...token },
+});
+
+test('copy buy never fills below the trader when the market feed lags', async () => {
+  const { e, f } = setup();
+  // feed says 0.000009, trader really paid 0.000019 (stale cached price)
+  await e.processTraderSignal(sig(f, { address: 'lagMint1', traderFillPriceUsd: 0.000019, currentPriceUsd: 0.000009 }));
+  const p = e.positions[0];
+  assert.ok(p, 'position opened');
+  assert.ok(p.entryPriceUsd >= 0.000019, `entry ${p.entryPriceUsd} must be ≥ trader fill`);
+  assert.ok(e.history[0].chaseGapPct >= 0);
+});
+
+test('a second copy of the same token within 30 s fills no cheaper than our first', async () => {
+  const { e, f } = setup();
+  await e.processTraderSignal(sig(f, { address: 'stackMint', traderFillPriceUsd: 0.00001, currentPriceUsd: 0.00001 }));
+  const first = e.positions[0].entryPriceUsd;
+  await e.processTraderSignal(sig(f, { address: 'stackMint', traderFillPriceUsd: 0.00001, currentPriceUsd: 0.00001 }));
+  const second = e.positions[0].entryPriceUsd;
+  assert.equal(e.positions.length, 2);
+  assert.ok(second > first, `second fill ${second} should be above first ${first}`);
+});
+
+test('buy network fee is part of cost basis; balance and PnL reconcile on a round trip', async () => {
+  const { e, f } = setup();
+  const w = e.getActiveWallet();
+  const start = w.paperBalanceUsd;
+  await e.processTraderSignal(sig(f, { address: 'rtMint', traderFillPriceUsd: 0.00002, currentPriceUsd: 0.00002 }));
+  const p = e.positions[0];
+  const buy = e.history[0];
+  assert.ok(buy.networkFeeUsd > 0);
+  assert.equal(p.initialCostUsd, Number((50 + buy.networkFeeUsd).toFixed(4)));
+  const r = await e.executePositionSell(p.id, { sellPct: 100 });
+  assert.ok(r.ok !== false);
+  const sell = e.history[0];
+  // fee = real Jupiter-trade rate on what the sale actually filled at (non-pump pool 0.25% + Jupiter 0.5%)
+  assert.ok(Math.abs(sell.platformFeeUsd - sell.tokens * sell.fillPriceUsd * 0.0075) < 1e-9);
+  assert.ok(Math.abs(buy.platformFeeUsd - 50 * 0.0075) < 1e-9);
+  // first buy of the token pays token-account rent (0.00203928 SOL) on top of gas
+  assert.ok(buy.networkFeeUsd > 0.00203928 * 100, `buy network fee ${buy.networkFeeUsd} includes rent`);
+  // balance change equals realized PnL (to rounding)
+  assert.ok(Math.abs((w.paperBalanceUsd - start) - p.realizedPnlUsd) <= 0.02, `${w.paperBalanceUsd - start} vs ${p.realizedPnlUsd}`);
+});
+
+test('open PnL subtracts the fees selling now would cost', async () => {
+  const { e, f } = setup();
+  await e.processTraderSignal(sig(f, { address: 'openMint', traderFillPriceUsd: 0.00002, currentPriceUsd: 0.00002 }));
+  const s = e.getStateSnapshot();
+  const p = s.positions[0];
+  assert.ok(Math.abs(p.exitFeesUsd - (p.valueUsd * 0.0075 + 0.0002 * 185 + 0.000005 * 185)) < 0.02, `exit fees ${p.exitFeesUsd}`);
+  assert.ok(Math.abs(p.unrealizedPnlUsd - (p.valueUsd - p.exitFeesUsd - p.remainingCostUsd)) <= 0.02);
+  assert.ok(Math.abs(s.positionsSummary.unrealizedPnlUsd - p.unrealizedPnlUsd) <= 0.02);
+});
+
+test('a lagging market feed cannot fake a crash after a real on-chain fill (Larpoors case)', async () => {
+  const { e, f } = setup();
+  f.mode = 'auto-exit';
+  f.exitRules.floor = { enabled: true, openingFloorPct: 30, tightFloorPct: 30, tightensAfterSec: 9999 };
+  const mint = 'FpXw6HxyTyW11de5cs76VuSiLdUFVR4fJbW4duDmpump';
+  await e.processTraderSignal(sig(f, { address: mint, traderFillPriceUsd: 0.00001015, currentPriceUsd: 0.00001015 }));
+  e.observeTradePrice(mint, 0.00001015);
+  const p = e.positions[0];
+  // DexScreener still shows the old price from a minute ago
+  const feed = (px) => async () => ({ ok: true, json: async () => ({ pairs: [{ baseToken: { address: mint }, priceUsd: String(px), liquidity: { usd: 5000 }, marketCap: 3700 }] }) });
+  e.priceFetch = feed(0.00000367);
+  await e.tickMarketPrices();
+  assert.ok(p.remainingTokens > 0, 'no fake floor exit');
+  assert.ok(Math.abs(p.currentPriceUsd - 0.00001015) < 1e-12, 'kept the real on-chain price');
+  // a feed price close to the real fill is still used
+  e.priceFetch = feed(0.0000105);
+  await e.tickMarketPrices();
+  assert.equal(p.currentPriceUsd, 0.0000105);
+});
+
+test('paper fee tiers follow the real venues', async () => {
+  const { solanaTradeFeePct } = await import('../engine/chainAdapters.mjs');
+  const now = Date.now();
+  assert.equal(solanaTradeFeePct({ address: 'xpump', stage: 'pre-grad' }, now).totalPct, 1.75);
+  assert.equal(solanaTradeFeePct({ address: 'xpump', stage: 'graduated', marketCapUsd: 50_000, createdAt: now - 2 * 86_400_000 }, now).totalPct, 1.35);
+  assert.equal(solanaTradeFeePct({ address: 'xpump', stage: 'graduated', marketCapUsd: 50_000_000, createdAt: now - 2 * 86_400_000 }, now).totalPct, 0.4);
+  assert.equal(solanaTradeFeePct({ address: 'RaydiumTokenMint', stage: 'graduated', createdAt: now - 3 * 86_400_000 }, now).totalPct, 0.35);
+  // a second buy of a token already held opens no new token account
+  const { e, f } = setup();
+  await e.processTraderSignal(sig(f, { address: 'rentMint', traderFillPriceUsd: 0.00002, currentPriceUsd: 0.00002 }));
+  const first = e.history[0].networkFeeUsd;
+  await new Promise((r) => setTimeout(r, 5));
+  await e.processTraderSignal(sig(f, { address: 'rentMint', traderFillPriceUsd: 0.00002, currentPriceUsd: 0.00002 }));
+  assert.ok(e.history[0].networkFeeUsd < first);
+});
