@@ -6365,3 +6365,24 @@ body, button, input, select, textarea, .kpi-label, .card-title, .term-tab {
 
 /* Notifications panel: same colour as the website background */
 .notif-dropdown { background: var(--bg); }
+
+/* Position cards: tags (chain, Paper, Renounced, exit mode) without borders */
+.position-card .pos-identity .tag,
+.position-card .pos-identity .pill-chain,
+.position-card .pos-identity [class*="chain-badge"] { border: 0 !important; box-shadow: none !important; }
+
+/* Wallet menu: "Manage wallet" as a white button with black text */
+.hwd-manage { height: 38px; margin-top: 8px; padding: 0 12px; background: #fff; color: #000; font-size: 13px; font-weight: 600; border-radius: 999px; }
+.hwd-manage:hover { background: #e5e7eb; color: #000; }
+
+/* KPI cards: negative PnL in red (the white override above only re-added green) */
+.kpi-value.pos-down { color: #fb7185 !important; }
+
+/* PnL calendar currency: one label (the current unit); one click flips USD <-> SOL */
+.pnlc-cur-toggle .pnlc-cur-divider,
+.pnlc-cur-toggle .pnlc-cur-unit:not(.active) { display: none !important; }
+.pnlc-cur-toggle { min-width: 46px; justify-content: center; }
+
+/* PnL calendar currency label: white text, no coloured tint (USD and SOL alike) */
+.pnlc-cur-unit.active.cur-usd,
+.pnlc-cur-unit.active.cur-sol { color: #fff !important; background: transparent !important; }

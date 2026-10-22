@@ -75,3 +75,32 @@ export async function fetchPumpCurves(rpc, mints, solPriceUsd) {
   });
   return out;
 }
+
+/**
+ * Where a copy really fills on a pump.fun bonding curve (constant product x·y = k, starting at
+ * 30 virtual SOL × 1,073,000,000 tokens). The trader's buy moves the curve first; the copy then
+ * buys on top of it:
+ *   trader: avg price p = V0·(V0+s)/k  →  pool before them V0 = (−s + √(s² + 4kp)) / 2
+ *   after the trader: V1 = V0 + s, marginal price V1²/k
+ *   our buy of x SOL: avg price V1·(V1+x)/k
+ * Returns null when the numbers don't describe a curve (e.g. graduated / other pool).
+ * Prices are in USD per token; s, x in SOL (what enters the curve, after fees).
+ */
+export const PUMP_CURVE_K = 30 * 1_073_000_000; // SOL × tokens
+export function pumpCurveCopyFill({ traderPriceUsd, traderSol, ourSol, solPriceUsd, startSol = 0 }) {
+  const px = Number(solPriceUsd);
+  const p = Number(traderPriceUsd) / px; // SOL per token
+  const s = Number(traderSol);
+  const x = Number(ourSol);
+  if (!(px > 0) || !(p > 0) || !(s > 0) || !(x > 0)) return null;
+  const k = PUMP_CURVE_K;
+  const v0 = (-s + Math.sqrt(s * s + 4 * k * p)) / 2;
+  // a live curve holds 30 virtual SOL + up to ~85 real SOL
+  if (!(v0 >= 29.5 && v0 <= 116)) return null;
+  const v1 = v0 + s + Math.max(0, Number(startSol) || 0); // + our own earlier copies, if any
+  return {
+    poolSolBefore: v0,
+    postTraderPriceUsd: ((v1 * v1) / k) * px,
+    fillPriceUsd: ((v1 * (v1 + x)) / k) * px,
+  };
+}

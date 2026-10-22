@@ -230,15 +230,21 @@ export class ChainExecutionAdapter {
     const liquidityUsd = knownLiquidity;
     const priceImpactPct = Math.min(99, (amountUsd / Math.max(1000, impactBasis)) * 100);
 
-    const fillPriceUsd =
+    let fillPriceUsd =
       side === 'buy'
         ? currentPriceUsd * (1 + priceImpactPct / 100)
         : currentPriceUsd * Math.max(0.01, 1 - priceImpactPct / 100);
+    let impactPct = priceImpactPct;
+    // exact curve fill computed by the engine (pump.fun bonding curve)
+    if (side === 'buy' && Number(token.paperFillPriceUsd) > 0) {
+      fillPriceUsd = Number(token.paperFillPriceUsd);
+      impactPct = Math.max(0, (fillPriceUsd / currentPriceUsd - 1) * 100);
+    }
 
     return {
       quotedPriceUsd: currentPriceUsd,
       expectedFillPriceUsd: fillPriceUsd,
-      priceImpactPct,
+      priceImpactPct: impactPct,
       liquidityUsd,
       maxAllowedSlippagePct: slippagePct,
       timestamp: Date.now(),

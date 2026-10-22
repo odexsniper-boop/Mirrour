@@ -113,3 +113,28 @@ test('paper fee tiers follow the real venues', async () => {
   await e.processTraderSignal(sig(f, { address: 'rentMint', traderFillPriceUsd: 0.00002, currentPriceUsd: 0.00002 }));
   assert.ok(e.history[0].networkFeeUsd < first);
 });
+
+test('pump.fun curve: a copy fills after the trader moved the curve, plus its own move', async () => {
+  const { CHAINS } = await import('../engine/chainAdapters.mjs');
+  const { pumpCurveCopyFill } = await import('../engine/pumpCurve.mjs');
+  const before = CHAINS.solana.nativePriceUsd;
+  CHAINS.solana.nativePriceUsd = 108;
+  try {
+    // José case: trader 0.26 SOL at $0.00001047 → we should land ~1.2% above them, not 0.2%
+    const c = pumpCurveCopyFill({ traderPriceUsd: 0.00001047, traderSol: 0.26, ourSol: 0.455, solPriceUsd: 108 });
+    const gap = (c.fillPriceUsd / 0.00001047 - 1) * 100;
+    assert.ok(gap > 1 && gap < 1.6, `gap ${gap}`);
+    // a 5 SOL trader buy moves the curve a lot
+    const big = pumpCurveCopyFill({ traderPriceUsd: 0.00003, traderSol: 5, ourSol: 0.455, solPriceUsd: 108 });
+    assert.ok((big.fillPriceUsd / 0.00003 - 1) * 100 > 4); // deep pool (~92 SOL): +5.9%
+    // prices that don't fit a curve (graduated coins) are left to the normal model
+    assert.equal(pumpCurveCopyFill({ traderPriceUsd: 0.01, traderSol: 1, ourSol: 0.5, solPriceUsd: 108 }), null);
+
+    const { e, f } = setup();
+    await e.processTraderSignal({ ...sig(f, { address: 'JoseMint1pump', traderFillPriceUsd: 0.00001047, currentPriceUsd: 0.00001047 }), traderBuyNative: 0.26 });
+    const entryGap = (e.positions[0].entryPriceUsd / 0.00001047 - 1) * 100;
+    assert.ok(entryGap > 1 && entryGap < 1.6, `engine entry gap ${entryGap}`);
+  } finally {
+    CHAINS.solana.nativePriceUsd = before;
+  }
+});

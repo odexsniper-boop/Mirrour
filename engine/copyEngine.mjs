@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { CHAINS, ChainExecutionAdapter, solanaTradeFeePct } from './chainAdapters.mjs';
+import { pumpCurveCopyFill } from './pumpCurve.mjs';
 
 /**
  * Default 5-Rule Auto-Exit Engine Suggestions & Ranges (exact mofo.gg specification)
@@ -584,7 +585,24 @@ export class CopyTradingEngine {
     // price up, and the market feed (cached up to 60 s) often lags fast launches. Our own paper
     // buys of this token in the last 30 s have pushed it further, so they set a floor too.
     // (Real copies get a real Jupiter quote instead.)
-    const quoteToken = paper ? this.paperBuyPriceFloor(follow.chainId, token) : token;
+    let quoteToken = paper ? this.paperBuyPriceFloor(follow.chainId, token) : token;
+    // pump.fun bonding curve: fill where a copy really lands — after the trader's own buy moved
+    // the curve, plus our buy's own move — instead of a flat impact estimate
+    if (paper && follow.chainId === 'solana' && /pump$/i.test(String(token.address || '')) && signal.traderBuyNative > 0) {
+      const solPx = CHAINS.solana.nativePriceUsd;
+      const feePct = solanaTradeFeePct(token).totalPct;
+      const c = pumpCurveCopyFill({
+        traderPriceUsd: token.traderFillPriceUsd,
+        traderSol: signal.traderBuyNative,
+        ourSol: (desiredUsd * (1 - feePct / 100)) / solPx,
+        solPriceUsd: solPx,
+      });
+      if (c) {
+        // our own copies in the last 30 s already pushed the curve further: never below them
+        const ownFloor = Number(quoteToken.currentPriceUsd) > c.postTraderPriceUsd ? Number(quoteToken.currentPriceUsd) / c.postTraderPriceUsd : 1;
+        quoteToken = { ...quoteToken, currentPriceUsd: c.postTraderPriceUsd * ownFloor, paperFillPriceUsd: c.fillPriceUsd * ownFloor, liquidityUsd: quoteToken.liquidityUsd };
+      }
+    }
 
     let quote;
     try {
