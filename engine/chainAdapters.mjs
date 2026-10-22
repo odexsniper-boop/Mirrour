@@ -119,7 +119,7 @@ export const PAPER_SOLANA_FEES = {
 export function solanaTradeFeePct(token = {}, now = Date.now()) {
   const F = PAPER_SOLANA_FEES;
   // pump.fun coins: mint address ends in "pump"
-  const pump = /pump$/i.test(String(token.address || ''));
+  const pump = /pump$/i.test(String(token.address || '')) || token.venue === 'pumpfun' || token.venue === 'pumpswap';
   let venuePct;
   if (pump && token.stage === 'pre-grad') venuePct = F.pumpCurvePct;
   else if (pump) {

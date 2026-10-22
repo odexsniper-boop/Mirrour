@@ -53,8 +53,36 @@ export class LiveSignalService {
       });
     this.watcher.onSignal = (s) => this.handleSignal(s);
     this.watcher.onStatus = () => this.pushStatus();
+    this.watcher.onTokenInfoLate = (mint, info) => this.applyLateTokenInfo(mint, info);
     this.lastStatusPush = 0;
     this.statusTimer = null;
+  }
+
+  /**
+   * Token details that arrived after a trade was already copied (see tokenInfoBudgetMs): fill in
+   * the name, symbol, logo and market data on the signal, positions and history.
+   */
+  applyLateTokenInfo(mint, info) {
+    const placeholder = `${mint.slice(0, 4)}…${mint.slice(-4)}`;
+    for (const s of this.signals) {
+      if (s.tokenMint !== mint) continue;
+      if (info.symbol && s.symbol === placeholder) s.symbol = info.symbol;
+      if (info.name && !s.name) s.name = info.name;
+      if (info.imageUrl && !s.imageUrl) s.imageUrl = info.imageUrl;
+      for (const k of ['marketCapUsd', 'liquidityUsd', 'dexId', 'pairCreatedAt', 'pairUrl']) if (info[k] != null && s[k] == null) s[k] = info[k];
+      if (info.authorityKnown && !s.authorityKnown) Object.assign(s, { authorityKnown: true, mintAuthority: info.mintAuthority ?? null, freezeAuthority: info.freezeAuthority ?? null });
+    }
+    let changed = false;
+    for (const p of this.engine.positions || []) {
+      if (p.tokenAddress !== mint) continue;
+      if (info.symbol && p.symbol === placeholder) (p.symbol = info.symbol), (changed = true);
+      if (info.name && (!p.name || p.name === placeholder)) (p.name = info.name), (changed = true);
+      if (info.imageUrl && !p.imageUrl) (p.imageUrl = info.imageUrl), (changed = true);
+      if (info.pairCreatedAt && !p.tokenCreatedAt) (p.tokenCreatedAt = info.pairCreatedAt), (changed = true);
+    }
+    for (const h of this.engine.history || []) if (h.tokenAddress === mint && info.symbol && h.symbol === placeholder) (h.symbol = info.symbol), (changed = true);
+    if (changed) this.engine.emit?.('token_info', { mint });
+    this.pushStatus(true);
   }
 
   /** Wallets to watch: Solana follows + manual entries, de-duplicated. */
@@ -136,7 +164,9 @@ export class LiveSignalService {
 
   /** Map a watcher signal to the engine's signal shape for one follow. */
   toEngineSignal(sig, follow) {
-    const isLaunchpad = sig.dexId === 'pumpfun' || /pump$/i.test(sig.tokenMint);
+    // pump.fun / PumpSwap: read from the trader's own transaction first (works for brand-new coins
+    // DexScreener doesn't list yet, and for pump.fun coins whose address doesn't end in "pump")
+    const isLaunchpad = sig.venue === 'pumpfun' || sig.venue === 'pumpswap' || sig.dexId === 'pumpfun' || sig.dexId === 'pumpswap' || /pump$/i.test(sig.tokenMint);
     return {
       chainId: 'solana',
       side: sig.side,
@@ -147,13 +177,16 @@ export class LiveSignalService {
       ageSec: sig.blockTime ? Math.max(0, (Date.now() - sig.blockTime) / 1000) : undefined,
       traderBuyUsd: sig.usdValue,
       traderBuyNative: sig.quoteSymbol === 'SOL' ? sig.quoteAmount : undefined,
+      // SOL that really reached the pool (no fees/tips): used for the curve maths
+      traderPoolSol: sig.quoteSymbol === 'SOL' && sig.poolQuoteAmount > 0 ? sig.poolQuoteAmount : undefined,
       live: true,
       token: {
         address: sig.tokenMint,
         symbol: sig.symbol,
         name: sig.name || sig.symbol,
         isLaunchpad,
-        stage: sig.dexId === 'pumpfun' ? 'pre-grad' : 'graduated',
+        // a pump.fun coin DexScreener doesn't list yet is still on its bonding curve
+        stage: sig.venue === 'pumpfun' ? 'pre-grad' : sig.venue === 'pumpswap' ? 'graduated' : sig.dexId === 'pumpfun' || (!sig.dexId && /pump$/i.test(sig.tokenMint)) ? 'pre-grad' : 'graduated',
         marketCapUsd: sig.marketCapUsd,
         liquidityUsd: sig.liquidityUsd,
         traderFillPriceUsd: sig.txPriceUsd,
@@ -162,6 +195,7 @@ export class LiveSignalService {
         currentPriceUsd: pickCurrentPrice(sig),
         imageUrl: sig.imageUrl || null,
         createdAt: sig.pairCreatedAt || null,
+        venue: sig.venue || null,
         // Freeze / mint authority come from Alchemy token metadata when available
         safety: sig.authorityKnown
           ? { safetyVerified: true, freezeAuthority: Boolean(sig.freezeAuthority), mintAuthority: Boolean(sig.mintAuthority) }
@@ -200,7 +234,10 @@ export class LiveSignalService {
   async handleSignal(sig) {
     if (this.signals.some((s) => s.signature === sig.signature)) return;
     // dust (under $1) is never a real copy-worthy trade; keep it out of the feed
-    if (!(Number(sig.usdValue) >= 1)) return;
+    if (!(Number(sig.usdValue) >= 1)) {
+      (this.dustSigs || (this.dustSigs = new Set())).add(sig.signature); // remembered for the missed-trade audit
+      return;
+    }
     const record = { ...sig, decisions: await this.decide(sig), paperCopied: false };
 
     // Every live fill from a watched wallet is a real price for that token

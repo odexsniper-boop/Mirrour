@@ -153,6 +153,9 @@ export class CopyTradingEngine {
         robinhood: 'stable', // 'stable' (USDG gasless) | 'native' (ETH)
         arc: 'stable', // USDC is Arc's native coin
       },
+      // One copy per trader position: once a trader's entry in a coin is copied, their further
+      // buys of that coin (top-ups) are not copied until they fully sell. true = copy every buy.
+      copyTopUps: false,
       cooldown: {
         enabled: true,
         mode: 'duration', // 'duration' | 'while_holding'
@@ -426,6 +429,11 @@ export class CopyTradingEngine {
     }
 
     const traderBuyUsd = Number(signal.traderBuyUsd ?? 100);
+    // Top-up of a coin we already copied in this trader position (they haven't fully sold yet)
+    if (!this.settings.copyTopUps && token.address && this.copiedCycleActive(follow.id, token.address)) {
+      return this.recordSkip({ dryRun, follow, wallet, signal, reason: 'trader is adding to a coin already copied (top-ups not copied)' });
+    }
+
     if (traderBuyUsd < follow.minTradeUsd) {
       return this.recordSkip({ dryRun, follow, wallet, signal, reason: 'below your minimum' });
     }
@@ -588,12 +596,12 @@ export class CopyTradingEngine {
     let quoteToken = paper ? this.paperBuyPriceFloor(follow.chainId, token) : token;
     // pump.fun bonding curve: fill where a copy really lands — after the trader's own buy moved
     // the curve, plus our buy's own move — instead of a flat impact estimate
-    if (paper && follow.chainId === 'solana' && /pump$/i.test(String(token.address || '')) && signal.traderBuyNative > 0) {
+    if (paper && follow.chainId === 'solana' && (/pump$/i.test(String(token.address || '')) || token.venue === 'pumpfun') && signal.traderBuyNative > 0) {
       const solPx = CHAINS.solana.nativePriceUsd;
       const feePct = solanaTradeFeePct(token).totalPct;
       const c = pumpCurveCopyFill({
         traderPriceUsd: token.traderFillPriceUsd,
-        traderSol: signal.traderBuyNative,
+        traderSol: signal.traderPoolSol > 0 ? signal.traderPoolSol : signal.traderBuyNative,
         ourSol: (desiredUsd * (1 - feePct / 100)) / solPx,
         solPriceUsd: solPx,
       });
@@ -688,8 +696,11 @@ export class CopyTradingEngine {
 
     const netInvestedUsd = Math.max(0.01, desiredUsd - execResult.platformFeeUsd);
     const tokensReceived = Number.isFinite(execResult.tokensReceived) && execResult.tokensReceived > 0 ? execResult.tokensReceived : netInvestedUsd / execResult.fillPriceUsd;
-    const entryMc =
-      token.marketCapUsd || Math.round((execResult.fillPriceUsd / 0.000001) * 1000);
+    // entry market cap at OUR fill price (same supply as the feed's market cap), so "Entry MC → now"
+    // always moves with the position's own price
+    const feedSupply = Number(token.marketCapUsd) > 0 && Number(token.currentPriceUsd) > 0 ? Number(token.marketCapUsd) / Number(token.currentPriceUsd) : null;
+    const pumpSupply = /pump$/i.test(String(token.address || '')) || token.venue === 'pumpfun' || token.venue === 'pumpswap' ? 1_000_000_000 : null;
+    const entryMc = Math.round(execResult.fillPriceUsd * (pumpSupply || feedSupply || 1e9));
 
     this.buyCooldownMap.set(`${follow.chainId}:${token.address}`, Date.now());
     if (paper) {
@@ -713,6 +724,7 @@ export class CopyTradingEngine {
       imageUrl: token.imageUrl || null,
       launchpad: token.launchpad || chain.launchpad,
       tokenCreatedAt: Number(token.createdAt) || null,
+      venue: token.venue || null,
       stage: token.stage || 'pre-grad',
       // only claim "renounced" when mint + freeze authority were actually checked and are empty
       renounced:
@@ -746,6 +758,7 @@ export class CopyTradingEngine {
       armedOrders: [],
     };
     this.positions.unshift(position);
+    this.markCopiedCycle(follow.id, token.address);
 
     const receipt = {
       id: `hist-${randomUUID().slice(0, 8)}`,
@@ -793,6 +806,8 @@ export class CopyTradingEngine {
 
   async handleLeaderSellSignal(follow, signal, { dryRun = false } = {}) {
     const wallet = this.getWalletById(follow.walletId);
+    // the trader fully exited: their next buy of this coin is a fresh entry again
+    if (!dryRun && Number(signal.sellSharePct ?? 100) >= 99 && signal.token?.address) this.endCopiedCycle(follow.id, signal.token.address);
     if (follow.mode !== 'mirror') {
       return this.recordSkip({
         dryRun,
@@ -939,7 +954,7 @@ export class CopyTradingEngine {
       chainId: pos.chainId,
       wallet,
       side: 'sell',
-      token: { address: pos.tokenAddress, symbol: pos.symbol, stage: pos.stage, launchpad: pos.launchpad, marketCapUsd: pos.currentMarketCapUsd, createdAt: pos.tokenCreatedAt },
+      token: { address: pos.tokenAddress, symbol: pos.symbol, stage: pos.stage, launchpad: pos.launchpad, marketCapUsd: pos.currentMarketCapUsd, createdAt: pos.tokenCreatedAt, venue: pos.venue },
       // paper fee is 1% of what the sale actually fills at (after price impact)
       amountUsd: real ? grossValueUsd : tokensSold * quote.expectedFillPriceUsd,
       quote,
@@ -1406,7 +1421,7 @@ export class CopyTradingEngine {
     let curves = new Map();
     let curvesFailed = false;
     if (!customMultiplierByPosId && typeof this.curveSource === 'function') {
-      const pumpMints = realMints.filter((m) => /pump$/i.test(m) || openPositions.some((p) => p.tokenAddress === m && (p.launchpad === 'pump.fun' || p.stage === 'pre-grad')));
+      const pumpMints = realMints.filter((m) => /pump$/i.test(m) || openPositions.some((p) => p.tokenAddress === m && (p.venue === 'pumpfun' || p.launchpad === 'pump.fun' || p.stage === 'pre-grad')));
       if (pumpMints.length) {
         try {
           curves = await this.curveSource(pumpMints);
@@ -1418,7 +1433,7 @@ export class CopyTradingEngine {
     }
     // a pump.fun coin whose curve was read fine but is gone has graduated to PumpSwap
     if (!customMultiplierByPosId && !curvesFailed && typeof this.curveSource === 'function') {
-      for (const p of openPositions) if (p.stage === 'pre-grad' && /pump$/i.test(p.tokenAddress || '') && !curves.has(p.tokenAddress)) p.stage = 'graduated';
+      for (const p of openPositions) if (p.stage === 'pre-grad' && (/pump$/i.test(p.tokenAddress || '') || p.venue === 'pumpfun') && !curves.has(p.tokenAddress)) p.stage = 'graduated';
     }
     const live = customMultiplierByPosId ? new Map() : await this.fetchLivePrices(realMints.filter((m) => !curves.has(m)));
 
@@ -1493,6 +1508,7 @@ export class CopyTradingEngine {
     this.history = [];
     this.alerts = [];
     this.realizedLog = [];
+    this.copiedCycles = {};
     this.buyCooldownMap.clear();
     this.emit('state_reset', {});
     return this.getStateSnapshot();
@@ -1551,6 +1567,31 @@ export class CopyTradingEngine {
     };
   }
 
+  /**
+   * Trader positions we have copied (follow + coin), so top-ups aren't copied as new positions.
+   * Ends when the trader sells 100%, or after 2 h (in case their sell was never seen).
+   */
+  copiedCycleActive(followId, mint) {
+    const c = this.copiedCycles?.[`${followId}:${mint}`];
+    if (!c) return false;
+    if (Date.now() - c > 2 * 3600_000) {
+      delete this.copiedCycles[`${followId}:${mint}`];
+      return false;
+    }
+    return true;
+  }
+
+  markCopiedCycle(followId, mint) {
+    if (!mint) return;
+    if (!this.copiedCycles) this.copiedCycles = {};
+    const k = `${followId}:${mint}`;
+    if (!this.copiedCycles[k]) this.copiedCycles[k] = Date.now();
+  }
+
+  endCopiedCycle(followId, mint) {
+    if (this.copiedCycles) delete this.copiedCycles[`${followId}:${mint}`];
+  }
+
   /** A real sell that did not go through: alert (once a minute per position), nothing booked. */
   realSellFailed(pos, error, execResult = null) {
     const now = Date.now();
@@ -1603,7 +1644,7 @@ export class CopyTradingEngine {
     if (!(valueUsd > 0)) return 0;
     const gasFn = typeof this.adapter.estimateNetworkFeeUsd === 'function' ? (g) => this.adapter.estimateNetworkFeeUsd(p.chainId, this.settings.priorityFee, g) : () => 0;
     if (p.chainId === 'solana') {
-      const pct = solanaTradeFeePct({ address: p.tokenAddress, stage: p.stage, launchpad: p.launchpad, marketCapUsd: p.currentMarketCapUsd, createdAt: p.tokenCreatedAt }).totalPct;
+      const pct = solanaTradeFeePct({ address: p.tokenAddress, stage: p.stage, launchpad: p.launchpad, marketCapUsd: p.currentMarketCapUsd, createdAt: p.tokenCreatedAt, venue: p.venue }).totalPct;
       return valueUsd * (pct / 100) + gasFn(false);
     }
     const gasless = p.chainId !== 'arc' && p.tradingAssetUsed === 'stable';

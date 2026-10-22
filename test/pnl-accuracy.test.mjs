@@ -39,6 +39,7 @@ test('copy buy never fills below the trader when the market feed lags', async ()
 
 test('a second copy of the same token within 30 s fills no cheaper than our first', async () => {
   const { e, f } = setup();
+  e.settings.copyTopUps = true; // two copies of one coin
   await e.processTraderSignal(sig(f, { address: 'stackMint', traderFillPriceUsd: 0.00001, currentPriceUsd: 0.00001 }));
   const first = e.positions[0].entryPriceUsd;
   await e.processTraderSignal(sig(f, { address: 'stackMint', traderFillPriceUsd: 0.00001, currentPriceUsd: 0.00001 }));
@@ -137,4 +138,26 @@ test('pump.fun curve: a copy fills after the trader moved the curve, plus its ow
   } finally {
     CHAINS.solana.nativePriceUsd = before;
   }
+});
+
+test('one copy per trader position: top-ups are not copied until the trader fully sells (ACTX case)', async () => {
+  const { e, f } = setup();
+  f.mode = 'auto-exit';
+  const mint = 'ActxMint11111111111111111111111111111111pump';
+  const buy = (sol) => ({ ...sig(f, { address: mint, traderFillPriceUsd: 0.00001, currentPriceUsd: 0.00001 }), traderBuyNative: sol });
+  await e.processTraderSignal(buy(2.5)); // real entry → copied
+  assert.equal(e.positions.length, 1);
+  await e.executePositionSell(e.positions[0].id, { sellPct: 100, cause: 'trailing stop hit' }); // our exit
+  await e.processTraderSignal(buy(0.025)); // trader top-up → not a new position
+  await e.processTraderSignal(buy(0.035));
+  assert.equal(e.positions.length, 1, 'top-ups did not open new positions');
+  assert.match(e.history[0].reason, /top-ups not copied/);
+  // trader sells everything → next buy is a fresh entry
+  await e.processTraderSignal({ chainId: 'solana', side: 'sell', traderHandle: f.handle, traderWallet: f.traderWallet, sellSharePct: 100, token: { address: mint, symbol: 'X' } });
+  await e.processTraderSignal(buy(1));
+  assert.equal(e.positions.length, 2, 'new trader entry copied after their full exit');
+  // switch on to copy every top-up
+  e.settings.copyTopUps = true;
+  await e.processTraderSignal(buy(0.03));
+  assert.equal(e.positions.length, 3);
 });

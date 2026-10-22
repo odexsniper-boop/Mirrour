@@ -6513,3 +6513,8 @@ body, button, input, select, textarea, .kpi-label, .card-title, .term-tab {
 /* PnL calendar amounts 10% smaller (16.5 → 14.85px; empty days 14 → 12.6px) */
 .pnlc-cell .pnlc-val, .pnlc-cell.is-up .pnlc-val, .pnlc-cell.is-down .pnlc-val, .pnlc-cell.is-best .pnlc-val { font-size: 14.85px !important; }
 .pnlc-cell:not(.is-up):not(.is-down) .pnlc-val, .pnlc-cell:not(.is-up):not(.is-down) .pnlc-val-s { font-size: 12.6px !important; }
+
+/* Phones: keep the last buttons clear of the floating bottom menu */
+@media (max-width: 760px) {
+  body { padding-bottom: 110px !important; }
+}

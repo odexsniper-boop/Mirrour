@@ -396,3 +396,79 @@ test('L20 mirror sell only sells the exact token, never another token with the s
   assert.equal(p2.remainingTokens, 0);
   assert.ok(p1.remainingTokens > 0, 'the other token was not touched');
 });
+
+test('L-speed: a slow token lookup does not hold up the copy; details are filled in afterwards', async () => {
+  const { engine, watcher, swap, fetchImpl, live } = setup();
+  await watcher.tokenInfo.get(WSOL_MINT); // SOL price already known, as in a running server
+  await watcher.pollOnce(); // first check only catches up on history (never copied)
+  // DexScreener/Alchemy slow for the new coin (1.5 s); budget 300 ms
+  watcher.tokenInfoBudgetMs = 300;
+  watcher.tokenInfo.fetch = async (url, opts) => {
+    if (String(url).includes(MEME)) await new Promise((r) => setTimeout(r, 1500));
+    return fetchImpl(url, opts);
+  };
+  swap('fast1', WALLET, 'buy');
+  const t0 = Date.now();
+  await watcher.pollOnce();
+  const ms = Date.now() - t0;
+  assert.ok(ms < 1000, `copy decided in ${ms} ms (was waiting for the slow lookup)`);
+  const pos = engine.positions[0];
+  assert.ok(pos, 'position opened without waiting for token details: ' + JSON.stringify({ sig: live.signals[0] && { copies: live.signals[0].copies, decisions: live.signals[0].decisions, backfill: live.signals[0].backfill }, hist: engine.history[0]?.reason, skips: watcher.status.recentSkips?.[0] }));
+  assert.equal(pos.symbol, `${MEME.slice(0, 4)}…${MEME.slice(-4)}`);
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal(pos.symbol, 'MEME', 'name filled in when the lookup finished');
+});
+
+test('L-audit: missed-trade audit marks detected vs never-seen trades from on-chain history', async () => {
+  const { watcher, swap, live } = setup();
+  await watcher.pollOnce(); // catch-up
+  swap('seen1', WALLET, 'buy');
+  await watcher.pollOnce(); // the bot detects this one
+  swap('missed1', WALLET, 'sell', { soldShare: 1 }); // happens while the bot isn't looking
+  const a = await watcher.auditWallet(WALLET, { minutes: 60 });
+  const bySig = Object.fromEntries(a.swaps.map((s) => [s.signature, s]));
+  assert.ok(bySig.seen1 && bySig.missed1, 'both trades found in on-chain history');
+  assert.equal(a.seenByWatcher.seen1, true);
+  assert.equal(a.seenByWatcher.missed1, false);
+  assert.ok(live.signals.some((s) => s.signature === 'seen1'));
+});
+
+test('L-venue: pump.fun trades are recognised from the transaction itself (no "pump" suffix, no DexScreener)', async () => {
+  const { parseSwapFromTransaction, PUMP_CURVE_PROGRAM } = await import('../engine/walletWatcher.mjs');
+  const mint = 'NoSuffixMint11111111111111111111111111111111';
+  const tok = { accountIndex: 2, mint, owner: WALLET, uiTokenAmount: { amount: '5000000000000', decimals: 6 } };
+  const tx = {
+    slot: 1, blockTime: Math.floor(Date.now() / 1000),
+    meta: { err: null, fee: 5000, preBalances: [5e9, 0, 0, 1], postBalances: [4.5e9 - 5000, 0, 0, 1], preTokenBalances: [{ ...tok, uiTokenAmount: { amount: '0', decimals: 6 } }], postTokenBalances: [tok] },
+    transaction: { signatures: ['v1'], message: { accountKeys: [{ pubkey: WALLET }, { pubkey: 'Pool111111111111111111111111111111111111111' }, { pubkey: 'Acc1111111111111111111111111111111111111111' }, { pubkey: PUMP_CURVE_PROGRAM }] } },
+  };
+  const swap = parseSwapFromTransaction(tx, WALLET);
+  assert.equal(swap.venue, 'pumpfun');
+  const { live, follow } = setup();
+  const es = live.toEngineSignal({ side: 'buy', wallet: WALLET, tokenMint: mint, venue: 'pumpfun', dexId: null, quoteSymbol: 'SOL', quoteAmount: 0.5 }, follow);
+  assert.equal(es.token.isLaunchpad, true, 'pump-only filter lets it through');
+  assert.equal(es.token.stage, 'pre-grad');
+});
+
+test('L-pool: the trader price comes from the SOL that reached the pool, not fees/tips (ACTX case)', async () => {
+  const { parseSwapFromTransaction, PUMP_CURVE_PROGRAM } = await import('../engine/walletWatcher.mjs');
+  const { bondingCurvePda } = await import('../engine/pumpCurve.mjs');
+  const mint = 'D9LYfL9d7uU4RJWoGTFF5Twxbbjt1ps7pYhNq7vppump';
+  const curve = bondingCurvePda(mint);
+  // wallet pays 0.035 SOL; only 0.0195 SOL enters the curve (the rest: tip, bot fee, priority fee)
+  const tokens = 1_861_000; // 0.0195 SOL / 1.0478e-8 SOL per token
+  const tx = {
+    slot: 9, blockTime: Math.floor(Date.now() / 1000),
+    meta: {
+      err: null, fee: 5000,
+      preBalances: [5e9, 30e9, 0, 1, 0], postBalances: [5e9 - 0.035e9 - 5000, 30e9 + 0.0195e9, 0, 1, 0.012e9],
+      preTokenBalances: [], postTokenBalances: [{ accountIndex: 2, mint, owner: WALLET, uiTokenAmount: { amount: String(tokens * 1e6), decimals: 6 } }],
+    },
+    transaction: { signatures: ['actx'], message: { accountKeys: [{ pubkey: WALLET }, { pubkey: curve }, { pubkey: 'Acc1111111111111111111111111111111111111111' }, { pubkey: PUMP_CURVE_PROGRAM }, { pubkey: 'Tip11111111111111111111111111111111111111111' }] } },
+  };
+  const s = parseSwapFromTransaction(tx, WALLET);
+  assert.equal(s.venue, 'pumpfun');
+  assert.ok(Math.abs(s.poolQuoteAmount - 0.0195) < 1e-9, `pool SOL ${s.poolQuoteAmount}`);
+  assert.ok(Math.abs(s.priceInQuote - 0.0195 / tokens) < 1e-15, 'price from the pool leg');
+  assert.ok(s.quoteAmount > 0.03, 'what the trader spent (minus the refundable deposit) is still reported');
+});

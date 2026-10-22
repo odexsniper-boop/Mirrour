@@ -139,6 +139,7 @@ function engineFor(trader, { paper = false, mode = 'auto-exit', size = 50 } = {}
   e.settings.paperTrading = paper;
   e.settings.cooldown.enabled = false;
   e.settings.tradingAsset.solana = 'native';
+  e.settings.copyTopUps = true; // these tests buy the same coin repeatedly
   e.adapter.liveHooks = trader.hooks();
   e.adapter.realEnabled = () => trader.ready();
   e.getActiveWallet().balances.solana = { native: 5, stable: 0 };

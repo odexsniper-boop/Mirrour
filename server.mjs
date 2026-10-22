@@ -15,6 +15,7 @@ import { openDatabase } from './engine/db.mjs';
 import { PersistenceManager, serializeEngine, serializeLive } from './engine/persistence.mjs';
 import { SupabaseMirror, SUPABASE_TABLE_SQL, isSupabaseUrl } from './engine/supabase.mjs';
 import fsSync from 'node:fs';
+import zlib from 'node:zlib';
 import { RealTrader } from './engine/realTrader.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -136,10 +137,21 @@ setInterval(() => {
 }, 15_000).unref?.();
 
 engine.onUpdate((evt) => {
+  if (!sseClients.size) {
+    if (evt.type === 'follows_updated' || evt.type === 'state_reset') liveSignals.sync();
+    return; // nobody watching: skip building the snapshot
+  }
+  const snap = engine.getStateSnapshot();
+  // A price tick only changes open positions: send just those (~5 KB) instead of the whole
+  // state (~140 KB, every 2 s while a position is open)
+  if (evt.type === 'market_tick') {
+    broadcastRaw({ event: evt.type, data: evt.payload, patch: { positions: snap.positions, positionsSummary: snap.positionsSummary } });
+    return;
+  }
   broadcastRaw({
     event: evt.type,
     data: evt.payload,
-    state: engine.getStateSnapshot(),
+    state: snap,
   });
   if (evt.type === 'follows_updated' || evt.type === 'state_reset') {
     liveSignals.sync();
@@ -158,10 +170,25 @@ function logPaperFunding(w, type, beforeUsd) {
 }
 
 let autoTickEnabled = true;
+// Ticks may overlap (a real sell can take seconds) but never pile up; an error in one tick is
+// logged and the next tick runs normally (it must never stop exits on open positions)
+let ticksRunning = 0;
 setInterval(async () => {
-  if (!autoTickEnabled) return;
-  await engine.tickMarketPrices();
+  if (!autoTickEnabled || ticksRunning >= 2) return;
+  ticksRunning += 1;
+  try {
+    await engine.tickMarketPrices();
+  } catch (err) {
+    console.error(`Price tick failed: ${redact(err?.message || String(err), alchemy.apiKey)}`);
+  } finally {
+    ticksRunning -= 1;
+  }
 }, 2000);
+
+// Safety net: a stray async error is logged instead of stopping the whole server
+process.on('unhandledRejection', (err) => {
+  console.error(`Unhandled error (server kept running): ${redact(err?.stack || err?.message || String(err), alchemy.apiKey)}`);
+});
 
 // Copies come only from real wallet swaps detected by the Live Signals watcher.
 
@@ -274,12 +301,31 @@ async function readJsonBody(req, limit = 1_000_000) {
   });
 }
 
+const acceptsGzip = (req) => /\bgzip\b/.test(String(req?.headers?.['accept-encoding'] || ''));
+
 function sendJson(res, statusCode, obj) {
-  res.writeHead(statusCode, {
-    'Content-Type': 'application/json; charset=utf-8',
-    'Cache-Control': 'no-store',
-  });
-  res.end(JSON.stringify(obj));
+  const body = JSON.stringify(obj);
+  const headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', Vary: 'Accept-Encoding' };
+  // big answers (state, signals: 100–250 KB) shrink ~85% gzipped — matters on a hosted deploy
+  if (body.length > 2048 && acceptsGzip(res.req)) {
+    res.writeHead(statusCode, { ...headers, 'Content-Encoding': 'gzip' });
+    return res.end(zlib.gzipSync(body, { level: 6 }));
+  }
+  res.writeHead(statusCode, headers);
+  res.end(body);
+}
+
+// Static files: gzip once per version, ETag so an unchanged file is a 304 (no re-download)
+const staticCache = new Map(); // path → { mtimeMs, size, etag, raw, gz }
+async function readStatic(filePath) {
+  const st = await fs.stat(filePath);
+  const hit = staticCache.get(filePath);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit;
+  const raw = await fs.readFile(filePath);
+  const compressible = /\.(html|css|js|json|svg|txt|map)$/i.test(filePath) && raw.length > 1024;
+  const entry = { mtimeMs: st.mtimeMs, size: st.size, etag: `"${st.size.toString(36)}-${Math.floor(st.mtimeMs).toString(36)}"`, raw, gz: compressible ? zlib.gzipSync(raw, { level: 9 }) : null };
+  staticCache.set(filePath, entry);
+  return entry;
 }
 
 export const server = http.createServer(async (req, res) => {
@@ -304,11 +350,24 @@ export const server = http.createServer(async (req, res) => {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no', // proxies must pass events through immediately
         Connection: 'keep-alive',
       });
       res.write(`data: ${JSON.stringify({ event: 'connected', state: engine.getStateSnapshot() })}\n\n`);
       sseClients.add(res);
-      req.on('close', () => sseClients.delete(res));
+      // heartbeat: hosting proxies (Railway) close connections that stay silent ~60 s
+      const beat = setInterval(() => {
+        try {
+          res.write(': keep-alive\n\n');
+        } catch {
+          clearInterval(beat);
+        }
+      }, 20_000);
+      beat.unref?.();
+      req.on('close', () => {
+        clearInterval(beat);
+        sseClients.delete(res);
+      });
       return;
     }
 
@@ -734,6 +793,7 @@ export const server = http.createServer(async (req, res) => {
         if (body.cooldown) {
           engine.settings.cooldown = { ...engine.settings.cooldown, ...body.cooldown };
         }
+        if (body.copyTopUps !== undefined) engine.settings.copyTopUps = Boolean(body.copyTopUps);
         if (body.retryBuys !== undefined) {
           engine.settings.retryBuys = Boolean(body.retryBuys);
         }
@@ -1092,6 +1152,70 @@ export const server = http.createServer(async (req, res) => {
       }
       return sendJson(res, 200, { ok: true, ...liveSignals.snapshot(false) });
     }
+    // Missed-trade audit: the trader's real buys/sells (on-chain) vs what the bot detected.
+    // Also saved to data/missed-trades.json. ?minutes=60&wallet=<address>
+    if (pathname === '/api/signals/missed' && req.method === 'GET') {
+      const minutes = Math.min(360, Math.max(5, Number(url.searchParams.get('minutes')) || 60));
+      const only = url.searchParams.get('wallet');
+      const wallets = liveSignals.watchList().map((w) => w.address).filter((a) => !only || a === only);
+      const bySig = new Map(liveSignals.signals.map((s) => [s.signature, s]));
+      const reports = [];
+      for (const address of wallets) {
+        try {
+          const a = await liveSignals.watcher.auditWallet(address, { minutes });
+          const trades = a.swaps
+            .sort((x, y) => x.blockTime - y.blockTime)
+            .map((s) => {
+              const sig = bySig.get(s.signature);
+              let status;
+              if (sig) status = sig.backfill ? 'detected (history catch-up, not copied)' : 'detected';
+              else if (liveSignals.dustSigs?.has(s.signature)) status = 'seen, ignored as dust (< $1)';
+              else if (a.seenByWatcher[s.signature]) status = 'seen, but not turned into a signal';
+              else status = 'MISSED (never seen by the bot)';
+              const copy = sig?.copies?.map((c) => c.status + (c.reason ? `: ${c.reason}` : '')).join('; ') || null;
+              return {
+                time: new Date(s.blockTime * 1000).toISOString(),
+                side: s.side,
+                token: sig?.symbol || s.tokenMint,
+                mint: s.tokenMint,
+                amount: `${Number(s.quoteAmount).toFixed(4)} ${s.quoteSymbol}`,
+                status,
+                delaySec: sig ? sig.latencySec : null,
+                via: sig?.via || null,
+                copy,
+                signature: s.signature,
+              };
+            });
+          const count = (f) => trades.filter(f).length;
+          reports.push({
+            wallet: address,
+            minutes,
+            watchMode: a.watch,
+            onChain: { historyEntries: a.historyEntries, failedSpam: a.failedEntries, read: a.read, truncated: a.truncated, unreadable: a.unreadable, notSwaps: a.notSwap },
+            summary: {
+              traderSwaps: trades.length,
+              detected: count((t) => t.status.startsWith('detected')),
+              missed: count((t) => t.status.startsWith('MISSED')),
+              seenNotSignal: count((t) => t.status.startsWith('seen, but')),
+              dust: count((t) => t.status.includes('dust')),
+            },
+            trades,
+          });
+        } catch (err) {
+          reports.push({ wallet: address, error: redact(err.message, alchemy.apiKey) });
+        }
+      }
+      const out = { ok: true, checkedAt: new Date().toISOString(), reports };
+      try {
+        const dir = process.env.ODEX_DATA_DIR || path.join(__dirname, 'data');
+        fsSync.mkdirSync(dir, { recursive: true });
+        fsSync.writeFileSync(path.join(dir, 'missed-trades.json'), JSON.stringify(out, null, 2));
+      } catch {
+        // report is still returned
+      }
+      return sendJson(res, 200, out);
+    }
+
     if (pathname === '/api/signals/poll' && req.method === 'POST') {
       const found = await liveSignals.watcher.pollOnce();
       return sendJson(res, 200, { ok: true, found: found.length, ...liveSignals.snapshot(true) });
@@ -1263,12 +1387,28 @@ export const server = http.createServer(async (req, res) => {
     const ext = path.extname(filePath).toLowerCase();
     const contentType = MIME_TYPES[ext] || 'application/octet-stream';
 
+    // never serve anything outside public/
+    const resolved = path.resolve(filePath);
+    if (resolved !== PUBLIC_DIR && !resolved.startsWith(PUBLIC_DIR + path.sep)) {
+      res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+      return res.end('Not found');
+    }
+
     try {
-      const content = await fs.readFile(filePath);
-      // the page itself is never cached, so a new version shows on the next load
-      // pages, styles and scripts are revalidated on every load so an update shows after a normal refresh
-      res.writeHead(200, /\.(html|css|js)$/.test(filePath) ? { 'Content-Type': contentType, 'Cache-Control': 'no-cache' } : { 'Content-Type': contentType });
-      res.end(content);
+      const f = await readStatic(resolved);
+      // pages, styles and scripts are revalidated on every load (an update shows after a normal
+      // refresh) but an unchanged file answers 304 instead of being downloaded again
+      const headers = { 'Content-Type': contentType, ETag: f.etag, Vary: 'Accept-Encoding', ...(/\.(html|css|js)$/.test(resolved) ? { 'Cache-Control': 'no-cache' } : { 'Cache-Control': 'public, max-age=86400' }) };
+      if (req.headers['if-none-match'] === f.etag) {
+        res.writeHead(304, headers);
+        return res.end();
+      }
+      if (f.gz && acceptsGzip(req)) {
+        res.writeHead(200, { ...headers, 'Content-Encoding': 'gzip' });
+        return res.end(f.gz);
+      }
+      res.writeHead(200, headers);
+      res.end(f.raw);
     } catch {
       res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
       res.end('Not found');

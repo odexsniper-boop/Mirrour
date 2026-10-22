@@ -21,6 +21,7 @@ export function serializeEngine(engine) {
     alerts: engine.alerts.slice(0, ALERTS_CAP),
     settings: engine.settings,
     buyCooldown: [...engine.buyCooldownMap.entries()],
+    copiedCycles: engine.copiedCycles || {},
   };
 }
 
@@ -39,6 +40,7 @@ export function restoreEngine(engine, data) {
       .sort((a, b) => a.t - b.t);
   }
   if (Array.isArray(data.alerts)) engine.alerts = data.alerts;
+  if (data.copiedCycles && typeof data.copiedCycles === 'object') engine.copiedCycles = { ...data.copiedCycles };
   if (data.settings && typeof data.settings === 'object') {
     // Merge so settings added in newer versions keep their defaults
     const merged = { ...engine.settings, ...data.settings };
@@ -145,11 +147,13 @@ export class PersistenceManager {
   /** Hook engine + live events so changes are saved automatically. */
   attach() {
     this.unsubscribe = this.engine.onUpdate((evt) => {
+      if (evt.type !== 'market_tick') this.cloudDirty = true; // a real change (not just prices)
       this.schedule(evt.type === 'market_tick' ? this.slowMs : this.fastMs);
     });
     if (this.live) {
       const original = this.live.broadcast;
       this.live.broadcast = (msg) => {
+        if (msg?.event === 'live_signal') this.cloudDirty = true;
         if (msg?.event === 'live_signal' || msg?.event === 'watcher_status') this.schedule(msg.event === 'live_signal' ? this.fastMs : this.slowMs);
         return original(msg);
       };
@@ -177,7 +181,13 @@ export class PersistenceManager {
       this.lastSavedAt = Date.now();
       this.lastError = null;
       this.saves += 1;
-      if (this.cloud?.enabled) this.cloud.schedule(entries);
+      // Cloud backup: real changes go up within seconds; price-only updates at most once a minute
+      // (each upload is the whole ~0.5 MB state)
+      if (this.cloud?.enabled && (this.cloudDirty !== false || Date.now() - (this.lastCloudAt || 0) > 60_000)) {
+        this.cloud.schedule(entries);
+        this.lastCloudAt = Date.now();
+        this.cloudDirty = false;
+      }
       // keep the SQLite journal small (every ~5 minutes)
       if (typeof this.store.checkpoint === 'function' && Date.now() - (this.lastCheckpointAt || 0) > 300_000) {
         this.lastCheckpointAt = Date.now();

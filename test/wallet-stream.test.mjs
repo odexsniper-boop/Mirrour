@@ -371,3 +371,26 @@ test('S9 provider without accountSubscribe (Alchemy): balance watch moves to the
   assert.ok(got[0].streamMs < 2000, `found ${got[0].streamMs} ms after the push`);
   w.stop();
 });
+
+test('S-light: a balance move is matched to the trade via the wallet history slot (no whole-block download)', async () => {
+  const t = Math.floor(Date.now() / 1000);
+  const calls = [];
+  const keys = [{ pubkey: WALLET, signer: true }, { pubkey: 'Pool1111111111111111111111111111111111111111', signer: false }, { pubkey: 'Acc11111111111111111111111111111111111111111', signer: false }];
+  const buy = { slot: 77, blockTime: t, meta: { err: null, fee: 5000, preBalances: [10e9, 1e9, 0], postBalances: [9e9 - 5000, 2e9, 0], preTokenBalances: [{ accountIndex: 2, mint: MEME, owner: WALLET, uiTokenAmount: { amount: '0', decimals: 6, uiAmount: 0 } }], postTokenBalances: [{ accountIndex: 2, mint: MEME, owner: WALLET, uiTokenAmount: { amount: '1000000000000', decimals: 6, uiAmount: 1e6 } }] }, transaction: { signatures: ['lightBuy'], message: { accountKeys: keys } } };
+  const fetchImpl = async (url, opts = {}) => {
+    const body = JSON.parse(opts.body);
+    calls.push(body.method);
+    let result = null;
+    if (body.method === 'getSignaturesForAddress') result = [{ signature: 'spam1', err: { x: 1 }, slot: 78 }, { signature: 'lightBuy', err: null, slot: 77 }, { signature: 'old', err: null, slot: 70 }];
+    else if (body.method === 'getTransaction') result = body.params[0] === 'lightBuy' ? buy : null;
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }));
+  };
+  const got = [];
+  const w = new SolanaWalletWatcher({ fetchImpl, rpcUrl: 'https://x.example', onSignal: (sg) => got.push(sg), pollIntervalMs: 3_600_000, stream: false, tokenInfo: { get: async () => ({ symbol: 'MEME', priceUsd: 0.0001 }), solPriceUsd: async () => 200 } });
+  w.running = true;
+  const wal = { address: WALLET, label: 'decu', mode: 'balances' };
+  const out = await w.slotCheck(wal, 77, Date.now());
+  assert.equal(out.length, 1);
+  assert.equal(out[0].signature, 'lightBuy');
+  assert.ok(!calls.includes('getBlock'), 'no whole-block download');
+});

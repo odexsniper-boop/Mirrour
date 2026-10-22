@@ -34,6 +34,10 @@ function connectSseStream() {
       if (payload.state) {
         engineState = payload.state;
         renderTerminalAll();
+      } else if (payload.patch && engineState) {
+        // price tick: only open positions changed
+        Object.assign(engineState, payload.patch);
+        renderTerminalAll();
       }
       const nt = uiPrefs().notify || {};
       if (payload.event === 'position_opened' && payload.data?.receipt) {
@@ -852,7 +856,7 @@ function renderClosedPositions() {
   }
   if (!rows.length) {
     tbody.__lastHtml = null;
-    tbody.innerHTML = emptyRowHtml(6, traderFilter ? `No closed trades from ${traderFilter.label}${dateFilterState.preset !== 'all' ? ` ${dateFilterPhrase()}` : ''}` : dateFilterState.preset !== 'all' && all.length ? `No closed trades ${dateFilterPhrase()}` : 'No closed trades yet', 'When a copied position is fully sold (by your exit rules, a mirror sell or by hand) it shows up here with what you paid, what came back and the result.');
+    tbody.innerHTML = emptyRowHtml(6, traderFilter ? `No closed trades from ${esc(traderFilter.label)}${dateFilterState.preset !== 'all' ? ` ${dateFilterPhrase()}` : ''}` : dateFilterState.preset !== 'all' && all.length ? `No closed trades ${dateFilterPhrase()}` : 'No closed trades yet', 'When a copied position is fully sold (by your exit rules, a mirror sell or by hand) it shows up here with what you paid, what came back and the result.');
     return;
   }
   setHtml(tbody, rows
@@ -1148,7 +1152,7 @@ function renderPositionsList() {
               ${tokenAvatar(p.imageUrl, p.symbol, 32, p.tokenAddress)}
               ${chainBadgeHtml(p.chainId)}
               <span class="pos-symbol">${tokenLinkHtml(p.symbol, p.tokenAddress)}</span>
-              <span class="pos-name-leader">${p.name} <span class="sep">·</span> copied ${walletAvatar(traderWalletOf(p), p.traderHandle, 16, 'w-avatar-xs')} ${traderLinkHtml(p.traderHandle, traderWalletOf(p))}</span>
+              <span class="pos-name-leader">${esc(p.name)} <span class="sep">·</span> copied ${walletAvatar(traderWalletOf(p), p.traderHandle, 16, 'w-avatar-xs')} ${traderLinkHtml(p.traderHandle, traderWalletOf(p))}</span>
               <span class="pos-tags">
                 ${p.isPaper ? '<span class="tag tag-paper">Paper</span>' : ''}
                 ${p.renounced ? '<span class="tag tag-green">Renounced</span>' : ''}
@@ -1401,7 +1405,7 @@ window.renderHistoryTable = function renderHistoryTable() {
 
       const diag =
         h.status === 'skipped'
-          ? `<span class="diag diag-warn">${h.reason}</span>`
+          ? `<span class="diag diag-warn">${esc(h.reason)}</span>`
           : h.explorerUrl
             ? `<a class="diag mono link" href="${esc(h.explorerUrl)}" target="_blank" rel="noopener">view tx ↗</a>`
             : `<span class="diag mono muted">paper fill</span>`;
@@ -1833,6 +1837,8 @@ function populateSettingsInputs() {
   document.getElementById('set-priority-mode').value = s.priorityFee.mode || 'normal';
   document.getElementById('set-retry-buys').value = String(Boolean(s.retryBuys));
   document.getElementById('set-trading-asset').value = s.tradingAsset.solana || 'stable';
+  const topUpsEl = document.getElementById('set-copy-topups');
+  if (topUpsEl) topUpsEl.value = s.copyTopUps ? 'true' : 'false';
 
   document.getElementById('set-min-mc').value = s.filters.minMarketCapUsd ?? '';
   document.getElementById('set-max-mc').value = s.filters.maxMarketCapUsd ?? '';
@@ -1878,6 +1884,7 @@ window.saveExecutionSettings = async function saveExecutionSettings() {
       cooldown,
       retryBuys: document.getElementById('set-retry-buys').value === 'true',
       tradingAsset: { solana: assetMode, bsc: assetMode, robinhood: assetMode, arc: 'stable' },
+      copyTopUps: document.getElementById('set-copy-topups')?.value === 'true',
     }),
   });
   const data = await res.json();
@@ -3084,7 +3091,7 @@ window.goTerminalTab = function goTerminalTab(tab) {
 // Footer status bar: Solana ping + website bug checker
 // ---------------------------------------------------------------------------
 // Skips that are the bot doing its job — used only to keep those out of popups
-const NORMAL_SKIP_RE = /manages exits itself|doesn't copy sells|nothing tracked to sell|below your minimum|watched manually|your account is paused|already holding|cooldown|price moved too far/i;
+const NORMAL_SKIP_RE = /manages exits itself|doesn't copy sells|nothing tracked to sell|below your minimum|watched manually|your account is paused|already holding|cooldown|price moved too far|top-ups not copied/i;
 let lastPing = { ms: null, ok: false, source: 'rpc' };
 let serverHealth = null; // { checks: [...], checkedAt }
 let healthUnavailable = false;

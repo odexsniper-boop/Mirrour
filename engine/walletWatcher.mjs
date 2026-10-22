@@ -10,6 +10,7 @@
  */
 
 import { WalletStream, looksLikeSwap, toWsUrl } from './walletStream.mjs';
+import { bondingCurvePda } from './pumpCurve.mjs';
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 export const QUOTE_MINTS = {
   [WSOL_MINT]: 'SOL',
@@ -26,6 +27,46 @@ export const TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 // A wallet whose newest 100 history entries span less than this is "flooded": other
 // people's bot transactions mention it so often that its own trades are buried.
 const FLOOD_WINDOW_SEC = 180;
+
+// Programs that tell us where a swap really happened (read from the trader's own transaction)
+export const PUMP_CURVE_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'; // pump.fun bonding curve
+export const PUMP_AMM_PROGRAM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA'; // PumpSwap (graduated pump.fun)
+
+/**
+ * SOL that really went into (buy) or came out of (sell) the pool in this transaction, so the
+ * trader's price isn't inflated by what never reached the pool: priority fees, tips, trading-bot
+ * fees, account deposits. On a 0.03 SOL buy those can be half of the SOL spent.
+ *   pump.fun curve: the coin's bonding-curve account's SOL change
+ *   PumpSwap / other pools: the largest wrapped-SOL vault change (not owned by the trader)
+ * Returns null when no pool leg can be identified (the wallet's SOL change is used instead).
+ */
+export function poolSolLeg(tx, wallet, { side, mint, venue, walletSol }) {
+  const meta = tx.meta;
+  const keys = (tx.transaction.message?.accountKeys || []).map(keyOf);
+  const sign = side === 'buy' ? 1 : -1;
+  const sane = (sol) => sol > 0 && sol <= walletSol * 1.05 + 1e-9;
+  if (venue === 'pumpfun') {
+    try {
+      const i = keys.indexOf(bondingCurvePda(mint));
+      if (i >= 0) {
+        const d = (Number(meta.postBalances?.[i] ?? 0) - Number(meta.preBalances?.[i] ?? 0)) / LAMPORTS_PER_SOL;
+        if (sane(sign * d)) return sign * d;
+      }
+    } catch {
+      // not derivable: fall through
+    }
+  }
+  // wrapped-SOL vaults (AMMs)
+  const pre = new Map();
+  for (const tb of meta.preTokenBalances || []) if (tb.mint === WSOL_MINT && tb.owner !== wallet) pre.set(tb.accountIndex, uiAmount(tb));
+  let best = 0;
+  for (const tb of meta.postTokenBalances || []) {
+    if (tb.mint !== WSOL_MINT || tb.owner === wallet) continue;
+    const d = sign * (uiAmount(tb) - (pre.get(tb.accountIndex) || 0));
+    if (d > best) best = d;
+  }
+  return sane(best) ? best : null;
+}
 
 export function isSolanaAddress(addr) {
   return typeof addr === 'string' && /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(addr);
@@ -145,6 +186,10 @@ export function parseSwapFromTransaction(tx, wallet) {
     return { skip: side === 'buy' ? 'tokens received without paying (airdrop or transfer in)' : 'tokens sent without receiving SOL/USDC (transfer out)' };
   }
 
+  // price from the pool leg (excludes fees, tips and deposits); SOL-quoted trades only
+  const swapVenue = keys.includes(PUMP_CURVE_PROGRAM) ? 'pumpfun' : keys.includes(PUMP_AMM_PROGRAM) ? 'pumpswap' : null;
+  const poolQuote = quote.symbol === 'SOL' ? poolSolLeg(tx, wallet, { side, mint: tok.mint, venue: swapVenue, walletSol: quote.amount }) : null;
+
   const before = preTotals.get(tok.mint) || 0;
   const sellSharePct = side === 'sell' && before > 0 ? Math.min(100, (Math.abs(tok.delta) / before) * 100) : side === 'sell' ? 100 : null;
 
@@ -156,10 +201,13 @@ export function parseSwapFromTransaction(tx, wallet) {
     quoteSymbol: quote.symbol,
     quoteMint: quote.mint,
     quoteAmount: quote.amount,
-    priceInQuote: quote.amount / Math.abs(tok.delta),
+    priceInQuote: (poolQuote > 0 ? poolQuote : quote.amount) / Math.abs(tok.delta),
+    poolQuoteAmount: poolQuote > 0 ? poolQuote : null, // SOL that really reached the pool
     signature: tx.transaction.signatures?.[0] || null,
     slot: tx.slot ?? null,
     blockTime: tx.blockTime ? tx.blockTime * 1000 : null,
+    // where it traded: decided from the programs in the transaction, not from a data feed
+    venue: keys.includes(PUMP_CURVE_PROGRAM) ? 'pumpfun' : keys.includes(PUMP_AMM_PROGRAM) ? 'pumpswap' : null,
   };
 }
 
@@ -237,6 +285,16 @@ export class TokenInfoService {
   async solPriceUsd() {
     const info = await this.get(WSOL_MINT);
     return info?.priceUsd || this.fallbackSolPriceUsd;
+  }
+
+  /** SOL price without waiting: the last known price (refreshed in the background when old). */
+  async solPriceFast() {
+    const hit = this.cache.get(WSOL_MINT);
+    if (hit?.info?.priceUsd) {
+      if (Date.now() - hit.at >= this.ttlMs) this.get(WSOL_MINT).catch(() => {});
+      return hit.info.priceUsd;
+    }
+    return this.solPriceUsd();
   }
 }
 
@@ -371,6 +429,10 @@ export class SolanaWalletWatcher {
     this.seenSigs = new Set();
     this.spamSigs = new Set(); // opened transactions that were not signed by the watched wallet
     this.maxRps = Number(process.env.ODEX_RPC_MAX_RPS || 15);
+    // Token details (name, logo, market data) may wait this long before a trade is passed on
+    // for copying; whatever arrives later is filled in afterwards (onTokenInfoLate)
+    this.tokenInfoBudgetMs = Number(process.env.ODEX_TOKEN_INFO_BUDGET_MS ?? 1200);
+    this.onTokenInfoLate = null;
     this.rpcTimes = [];
     this.emittedSigs = new Map(); // signature → token mint, for trades that became signals
     this.timer = null;
@@ -734,7 +796,33 @@ export class SolanaWalletWatcher {
       return null;
     }
 
-    const [info, solPrice] = await Promise.all([this.tokenInfo.get(swap.tokenMint), this.tokenInfo.solPriceUsd()]);
+    // Copy speed: token details from DexScreener / Alchemy can take many seconds for a brand-new
+    // coin. Wait at most tokenInfoBudgetMs, then pass the trade on with the trader's own
+    // on-chain price; the details are filled in when they arrive.
+    const infoPromise = this.tokenInfo.get(swap.tokenMint);
+    let infoLate = false;
+    let budgetTimer = null;
+    const [info, solPrice] = await Promise.all([
+      this.tokenInfoBudgetMs > 0
+        ? Promise.race([
+            infoPromise,
+            new Promise((resolve) => {
+              budgetTimer = setTimeout(() => {
+                infoLate = true;
+                resolve(null);
+              }, this.tokenInfoBudgetMs);
+              budgetTimer.unref?.();
+            }),
+          ])
+        : infoPromise,
+      typeof this.tokenInfo.solPriceFast === 'function' ? this.tokenInfo.solPriceFast() : this.tokenInfo.solPriceUsd(),
+    ]);
+    if (budgetTimer) clearTimeout(budgetTimer);
+    if (infoLate) {
+      infoPromise.then((late) => {
+        if (late && typeof this.onTokenInfoLate === 'function') this.onTokenInfoLate(swap.tokenMint, late);
+      }, () => {});
+    }
     const quoteUsd = swap.quoteSymbol === 'SOL' ? solPrice : 1;
     const usdValue = swap.quoteAmount * quoteUsd;
     const txPriceUsd = swap.priceInQuote * quoteUsd;
@@ -764,6 +852,8 @@ export class SolanaWalletWatcher {
       authorityKnown: Boolean(info?.authorityKnown),
       mintAuthority: info?.mintAuthority ?? null,
       freezeAuthority: info?.freezeAuthority ?? null,
+      venue: swap.venue || null,
+      poolQuoteAmount: swap.poolQuoteAmount ?? null,
       signature: sig,
       explorerUrl: `https://solscan.io/tx/${sig}`,
       blockTime: swap.blockTime,
@@ -782,6 +872,84 @@ export class SolanaWalletWatcher {
       // ignore listener errors
     }
     return signal;
+  }
+
+  /**
+   * Missed-trade audit (read-only): every buy/sell this wallet really made in the last
+   * `minutes`, read straight from its on-chain history, so it can be compared with what the
+   * watcher picked up. Pages back through spam-flooded histories; failed transactions skipped.
+   */
+  async auditWallet(address, { minutes = 60, maxSigs = 4000, maxTx = 400 } = {}) {
+    const since = Math.floor(Date.now() / 1000) - minutes * 60;
+    // gentle on the RPC: an audit must never starve live copying, and must survive rate limits
+    const patient = async (method, params) => {
+      for (let i = 0; ; i++) {
+        try {
+          return await this.rpc(method, params);
+        } catch (err) {
+          if (!err.rateLimited || i >= 8) throw err;
+          await new Promise((r) => setTimeout(r, 2000 * (i + 1)));
+        }
+      }
+    };
+    const all = [];
+    let before;
+    pages: while (all.length < maxSigs) {
+      const opts = { limit: 500, commitment: 'confirmed' };
+      if (before) opts.before = before;
+      const page = (await patient('getSignaturesForAddress', [address, opts])) || [];
+      if (!page.length) break;
+      for (const s of page) {
+        if (s.blockTime && s.blockTime < since) break pages;
+        all.push(s);
+      }
+      before = page[page.length - 1].signature;
+      if (page.length < 500) break;
+      await new Promise((r) => setTimeout(r, 400));
+    }
+    const ok = all.filter((s) => !s.err);
+    const toRead = ok.slice(0, maxTx);
+    const swaps = [];
+    const notSwap = {};
+    let unreadable = 0;
+    for (const s of toRead) {
+      let tx = null;
+      for (let i = 0; i < 6 && !tx; i++) {
+        try {
+          tx = await this.getTransaction(s.signature);
+          if (!tx) break;
+        } catch (err) {
+          if (!err.rateLimited) break;
+          await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+        }
+      }
+      if (!tx) {
+        unreadable += 1;
+        continue;
+      }
+      await new Promise((r) => setTimeout(r, 60)); // ~15 reads/s at most
+      const swap = parseSwapFromTransaction(tx, address);
+      if (swap && !swap.skip) {
+        swaps.push({ signature: s.signature, side: swap.side, tokenMint: swap.tokenMint, quoteSymbol: swap.quoteSymbol, quoteAmount: swap.quoteAmount, tokenAmount: swap.tokenAmount, priceInQuote: swap.priceInQuote, blockTime: swap.blockTime });
+      } else {
+        const why = swap?.skip || 'unreadable';
+        notSwap[why] = (notSwap[why] || 0) + 1;
+      }
+    }
+    const w = this.wallets.get(address);
+    return {
+      address,
+      minutes,
+      historyEntries: all.length,
+      failedEntries: all.length - ok.length,
+      read: toRead.length,
+      truncated: ok.length > toRead.length,
+      unreadable,
+      notSwap,
+      swaps,
+      watch: w ? { mode: w.mode || 'transactions', floodedAt: w.floodedAt || null, lastPollAt: w.lastPollAt || null, error: w.error || null } : null,
+      seenByWatcher: Object.fromEntries(swaps.map((s) => [s.signature, this.seenSigs.has(s.signature)])),
+    };
   }
 
   /**
@@ -961,6 +1129,43 @@ export class SolanaWalletWatcher {
     w.slotsChecked.add(slot);
     if (w.slotsChecked.size > 200) w.slotsChecked = new Set([...w.slotsChecked].slice(-100));
     w.lastMoveAt = Date.now();
+
+    // Light path first: the wallet's newest history entries already carry their slot, so the
+    // trade can be found without downloading the whole block (a heavy call that rate limits hit).
+    for (let attempt = 0; attempt < 4 && this.running; attempt++) {
+      let recent = null;
+      try {
+        recent = (await this.rpc('getSignaturesForAddress', [w.address, { limit: 300, commitment: 'confirmed' }])) || [];
+      } catch {
+        break; // fall back to the block read below
+      }
+      if (!recent.length || recent[0].slot == null) break; // this RPC gives no slots: use the block read
+      const newest = recent[0].slot;
+      const oldest = recent[recent.length - 1]?.slot ?? Infinity;
+      if (newest < slot) {
+        await sleep(400); // the slot isn't indexed yet
+        continue;
+      }
+      if (oldest > slot && recent.length >= 300) break; // flooded past it: read the block instead
+      this.streamStats.slotLookups = (this.streamStats.slotLookups || 0) + 1;
+      const inSlot = recent.filter((s) => s.slot === slot && !s.err && !this.seenSigs.has(s.signature)).map((s) => s.signature);
+      const out = [];
+      for (const sig of inSlot) {
+        const found = await this.processSignature(w, sig, { backfill: false, via: 'stream', receivedAt, waitForTx: true });
+        if (found) {
+          found.source = 'balances-verified';
+          out.push(found);
+        }
+      }
+      if (out.length) {
+        this.streamStats.signals += out.length;
+        w.lastSlotTradeAt = Date.now();
+      } else if (!inSlot.length) {
+        this.noteSkip(w, `slot-${slot}`, 'balance changed but no trade signed by this wallet (transfer in/out)');
+      }
+      return out;
+    }
+
     let block = null;
     for (let attempt = 0; attempt < 10 && this.running; attempt++) {
       try {

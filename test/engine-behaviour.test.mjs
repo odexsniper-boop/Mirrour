@@ -146,6 +146,7 @@ test('A6 filters: pump-only and market-cap filters apply even when the follow ha
 
 test('A7 cooldown: second buy of same token inside 10 min is skipped', async () => {
   const e = makeEngine();
+  e.settings.copyTopUps = true; // this test is about the cooldown, not top-ups
   const f = addFollow(e);
   const tok = { address: 'sameTokMint', symbol: 'SAME' };
   assert.equal((await open(e, f, tok)).status, 'filled');
