@@ -28,6 +28,14 @@ By default only this computer can open the terminal. To allow other devices on y
 
 **Settings** (left menu, bottom): Copytrades, Trading & risk, Data & storage, Profile (name, time zone, start page), Security (network access, keys, sell confirmations, hide balances) and Notifications (which pop-ups appear, sound).
 
+## Deploy on Railway
+
+1. New project → Deploy from GitHub repo. Start command is `npm start` (Node ≥ 22.5).
+2. Variables: `ODEX_PASSWORD` (site password — the browser asks for it; any username), `ALCHEMY_API_KEY`, `SUPABASE_URL` + `SUPABASE_SERVICE_KEY` (keeps your data across redeploys). Add `ODEX_TRADER_KEY` only with a password set.
+3. Settings → Networking → Generate Domain.
+
+On Railway the server listens on `0.0.0.0` and Railway's `PORT` automatically, and its own domain is allowed by the request guard. Without `ODEX_PASSWORD` real trading stays off there. Railway's disk is wiped on every deploy: use Supabase (or a Railway Volume mounted at `/app/data`).
+
 ## Live Signals
 
 The **Live Signals** tab watches real Solana wallets and lists their actual buys and sells as they land on-chain, with the copy result for each follow. It only reads public data and never sends a transaction.

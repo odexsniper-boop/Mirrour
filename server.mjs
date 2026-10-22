@@ -2,7 +2,7 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { CopyTradingEngine, createDefaultExitRules, recommendedExitRules, activeExitRuleCount, createDefaultUiSettings } from './engine/copyEngine.mjs';
 import { CHAINS } from './engine/chainAdapters.mjs';
 import { LiveSignalService } from './engine/liveSignals.mjs';
@@ -23,8 +23,21 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 // Local secrets (e.g. ALCHEMY_API_KEY) live in .env next to server.mjs — never in public/ files
 const envFile = loadEnvFile(path.join(__dirname, '.env'));
 const PORT = Number(process.env.PORT || 3400);
+// Hosting platforms (Railway) must reach the server from outside the container
+const ON_RAILWAY = Boolean(process.env.RAILWAY_ENVIRONMENT || process.env.RAILWAY_PUBLIC_DOMAIN || process.env.RAILWAY_PROJECT_ID);
 // Only this computer can open the terminal unless ODEX_HOST says otherwise (Settings → Security)
-const HOST = process.env.ODEX_HOST || '127.0.0.1';
+const HOST = process.env.ODEX_HOST || (ON_RAILWAY ? '0.0.0.0' : '127.0.0.1');
+// Optional site password (HTTP Basic auth, any username). Set it on any public deploy.
+const SITE_PASSWORD = process.env.ODEX_PASSWORD || '';
+function passwordOk(req) {
+  if (!SITE_PASSWORD) return true;
+  const h = String(req.headers.authorization || '');
+  if (!h.startsWith('Basic ')) return false;
+  const dec = Buffer.from(h.slice(6), 'base64').toString('utf8');
+  const given = Buffer.from(dec.slice(dec.indexOf(':') + 1));
+  const want = Buffer.from(SITE_PASSWORD);
+  return given.length === want.length && timingSafeEqual(given, want);
+}
 
 // Alchemy: Solana RPC + token metadata/images. The key stays on the server.
 export const alchemy = new AlchemyService({ apiKey: process.env.ALCHEMY_API_KEY });
@@ -98,8 +111,10 @@ export const realTrader = new RealTrader({
   },
 });
 engine.adapter.liveHooks = realTrader.hooks();
-engine.adapter.realEnabled = () => realTrader.ready();
-engine.realTradingActive = () => !engine.settings.paperTrading && realTrader.ready();
+// On a public deploy, real trading needs a site password (otherwise anyone with the link could trade)
+const realBlockedReason = ON_RAILWAY && !SITE_PASSWORD ? 'public deploy without ODEX_PASSWORD: real trading is disabled' : null;
+engine.adapter.realEnabled = () => realTrader.ready() && !realBlockedReason;
+engine.realTradingActive = () => !engine.settings.paperTrading && engine.adapter.realEnabled();
 
 // Real balance of the bot wallet → the engine's wallet balances (used for sizing and spend checks)
 async function refreshRealBalance() {
@@ -217,6 +232,7 @@ function isAllowedHost(hostHeader) {
   if (!host) return true; // non-browser clients
   if (host === 'localhost' || /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || host.includes(':')) return true;
   const extra = String(process.env.ODEX_ALLOWED_HOSTS || '').toLowerCase().split(',').map((s) => s.trim()).filter(Boolean);
+  if (process.env.RAILWAY_PUBLIC_DOMAIN) extra.push(String(process.env.RAILWAY_PUBLIC_DOMAIN).toLowerCase());
   return extra.includes(host);
 }
 function requestBlockedReason(req) {
@@ -267,6 +283,10 @@ function sendJson(res, statusCode, obj) {
 }
 
 export const server = http.createServer(async (req, res) => {
+  if (!passwordOk(req)) {
+    res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Odex Mirror", charset="UTF-8"', 'Content-Type': 'text/plain; charset=utf-8' });
+    return res.end('Password required');
+  }
   try {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
     const pathname = url.pathname;
@@ -1260,6 +1280,8 @@ export const server = http.createServer(async (req, res) => {
 
 if (process.argv[1] && path.resolve(process.argv[1]) === __filename) {
   server.listen(PORT, HOST, () => {
+    if (ON_RAILWAY) console.log(`Railway: listening on ${HOST}:${PORT}${process.env.RAILWAY_PUBLIC_DOMAIN ? ` (https://${process.env.RAILWAY_PUBLIC_DOMAIN})` : ''}; site password ${SITE_PASSWORD ? 'ON' : 'OFF — set ODEX_PASSWORD'}`);
+    if (realBlockedReason && realTrader.ready()) console.log(`Real trading: ${realBlockedReason}`);
     if (realTrader.keyError) console.log(`Real trading: ${realTrader.keyError}`);
     else if (realTrader.ready()) {
       const c = realTrader.caps;

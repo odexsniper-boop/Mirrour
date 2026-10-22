@@ -4696,7 +4696,7 @@ function renderPnlCalendar(loading = false) {
     const c = d?.days?.[day];
     const v = c?.pnl || 0;
     const tone = v > 0 ? 'is-up' : v < 0 ? 'is-down' : '';
-    const mark = best && d?.best?.day === day ? ' is-best' : best && d?.worst?.day === day ? ' is-worst' : '';
+    const mark = best && d?.best?.day === day ? ' is-best' : ''; // trophy highlights the best day only
     const isToday = `${year}-${month}-${day}` === todayKey ? ' is-today' : '';
     const vSol = v ? v / solPrice : 0;
     const valDisplay = isSol ? (v ? signedCalSol(vSol) : '0.00 SOL') : (v ? signedUsd(v) : '$0.00');
@@ -4713,8 +4713,8 @@ function renderPnlCalendar(loading = false) {
 
     note.textContent = loading
       ? 'Loading…'
-      : best && (d?.best || d?.worst)
-        ? `${d.best ? `Best day: ${d.best.day} ${label.split(' ')[0]} (${bestStr})` : ''}${d.best && d.worst ? ' · ' : ''}${d.worst ? `Worst day: ${d.worst.day} ${label.split(' ')[0]} (${worstStr})` : ''}`
+      : best && d?.best
+        ? `Best day: ${d.best.day} ${label.split(' ')[0]} (${bestStr})`
         : mode === 'real'
           ? (isSol ? 'Real trading isn\'t switched on yet, so real-SOL results stay at 0.00 SOL until it is.' : 'Real trading isn\'t switched on yet, so real-SOL results stay at $0 until it is.')
           : `Realized PnL from paper sells, by day (${utc ? 'UTC' : 'your time zone'}).`;
