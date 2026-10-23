@@ -378,3 +378,50 @@ test('audit: a landed swap whose transaction cannot be read is still booked (est
   assert.equal(e2.positions.length, 1);
   assert.equal(w2.trader.trades[0].estimated, true);
 });
+
+// ---------- audit 2 (Oct 23): concurrency and risk-limit fixes ----------
+
+test('audit2: two buy signals for the same coin at once are copied once (no double real buy)', async () => {
+  const { w, trader } = world();
+  const { e, f } = engineFor(trader);
+  e.settings.copyTopUps = false;
+  const [a, b] = await Promise.all([e.processTraderSignal(buySig(f)), e.processTraderSignal(buySig(f))]);
+  assert.equal(e.positions.filter((p) => p.remainingTokens > 0).length, 1, `one position (${JSON.stringify([a, b].flat().map((r) => r.status + ':' + (r.reason || '')))})`);
+  assert.equal(w.sent.length, 1, 'only one swap sent');
+});
+
+test('audit2: buys running at the same time cannot go over the daily SOL cap together', async () => {
+  const { w, trader } = world({ sol: 10 });
+  const token = { address: MINT, symbol: 'MEME', currentPriceUsd: 0.00002 };
+  const rs = await Promise.all(Array.from({ length: 5 }, () => trader.execute({ side: 'buy', token, amountUsd: 90, slippagePct: 15, assetMode: 'native' })));
+  const ok = rs.filter((r) => r.ok).length;
+  assert.equal(ok, 4, `4 × 0.45 SOL fit in 2 SOL, the 5th must be refused (${rs.map((r) => r.ok || r.error).join(' | ')})`);
+  assert.equal(w.sent.length, 4);
+  assert.ok(trader.spent24hSol() <= 2 + 1e-9);
+  assert.equal(trader.pendingBuySol, 0, 'nothing left counted as in progress');
+});
+
+test('audit2: an exit blocked by a sell already in progress does not mark "initials taken"', async () => {
+  const { trader } = world();
+  const { e, f } = engineFor(trader, { paper: true });
+  f.exitRules.takeInitials.enabled = true;
+  await e.processTraderSignal(buySig(f));
+  const p = e.positions[0];
+  p.currentPriceUsd = p.entryPriceUsd * 1.5;
+  e.sellsInFlight = new Set([p.id]);
+  const r = await e.evaluatePositionExits(p);
+  assert.equal(r?.inFlight, true);
+  assert.equal(p.initialsTaken, false, 'rule retried on the next tick');
+});
+
+test('audit2: daily loss limit is a rolling 24 h window and counts only the same mode', async () => {
+  const { trader } = world();
+  const { e, f } = engineFor(trader, { paper: true });
+  e.settings.risk.dailyLossLimitUsd = 10;
+  // a real-money loss must not pause paper buying
+  e.realizedLog.push({ t: Date.now(), pnl: -50, paper: false, closes: true, posPnl: -50 });
+  e.settings.risk.dailyLossTriggered = true;
+  await e.processTraderSignal(buySig(f));
+  assert.equal(e.positions.length, 1, 'pause lifted: no paper losses in the last 24 h');
+  assert.equal(e.settings.risk.dailyLossTriggered, false);
+});

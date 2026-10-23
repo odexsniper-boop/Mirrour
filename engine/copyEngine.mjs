@@ -410,7 +410,36 @@ export class CopyTradingEngine {
    * @param {object} opts.dryRun  When true, run every entry check and sizing step but stop
    *                              before execution: nothing is bought, debited or recorded.
    */
-  async handleLeaderBuySignal(follow, signal, { dryRun = false } = {}) {
+  async handleLeaderBuySignal(follow, signal, opts = {}) {
+    if (opts.dryRun || !signal?.token?.address) return this.handleLeaderBuySignalNow(follow, signal, opts);
+    // One buy per trader + coin at a time. A buy takes seconds (a real swap up to a minute) and
+    // the trader's next buy of the same coin can arrive meanwhile: without this lock both were
+    // copied, because the "already copied" mark is only set once the first buy has filled.
+    if (!this.buysInFlight) this.buysInFlight = new Set();
+    const key = `${follow.id}:${signal.token.address}`;
+    if (this.buysInFlight.has(key)) {
+      return this.recordSkip({
+        follow,
+        wallet: this.getWalletById(follow.walletId),
+        signal,
+        reason: this.settings.copyTopUps ? 'a copy of this coin is already being bought' : 'trader is adding to a coin already copied (top-ups not copied)',
+      });
+    }
+    this.buysInFlight.add(key);
+    try {
+      return await this.handleLeaderBuySignalNow(follow, signal, opts);
+    } finally {
+      this.buysInFlight.delete(key);
+    }
+  }
+
+  /** Losses realized in the last 24 h for one mode (paper or real). */
+  realizedLoss24h(paper) {
+    const cutoff = Date.now() - 86_400_000;
+    return (this.realizedLog || []).filter((r) => r.t >= cutoff && Boolean(r.paper) === Boolean(paper) && r.pnl < 0).reduce((a, r) => a + Math.abs(r.pnl), 0);
+  }
+
+  async handleLeaderBuySignalNow(follow, signal, { dryRun = false } = {}) {
     const wallet = this.getWalletById(follow.walletId);
     const chain = CHAINS[follow.chainId];
     const token = signal.token;
@@ -424,6 +453,11 @@ export class CopyTradingEngine {
       return this.recordSkip({ dryRun, follow, wallet, signal, reason: `trade is too old to copy (${Math.round(signal.ageSec)}s)` });
     }
 
+    // the daily loss limit is a rolling 24 h window: lift the pause once old losses roll out
+    if (this.settings.risk.dailyLossTriggered && !dryRun) {
+      const lim = Number(this.settings.risk.dailyLossLimitUsd);
+      if (!(lim > 0) || this.realizedLoss24h(Boolean(this.settings.paperTrading)) < lim) this.settings.risk.dailyLossTriggered = false;
+    }
     if (this.settings.risk.dailyLossTriggered || follow.pauseReason === 'streak') {
       return this.recordSkip({ dryRun, follow, wallet, signal, reason: 'risk protection is active' });
     }
@@ -1046,7 +1080,20 @@ export class CopyTradingEngine {
       timestamp: Date.now(),
     };
     this.history.unshift(receipt);
-    this.realizedLog.push({ t: receipt.timestamp, pnl: receipt.pnlUsd, paper: Boolean(receipt.isPaper), sym: receipt.symbol });
+    // The permanent PnL log: the one source for every PnL figure (calendar, Period PnL, win rate,
+    // Closed totals). Never trimmed by the 2-day cleanup.
+    const solPxNow = Number(CHAINS.solana?.nativePriceUsd) || 0;
+    this.realizedLog.push({
+      t: receipt.timestamp,
+      pnl: receipt.pnlUsd,
+      paper: Boolean(receipt.isPaper),
+      sym: receipt.symbol,
+      cost: Number(costBasisSoldUsd.toFixed(4)), // cost basis of the part sold
+      sol: solPxNow > 0 ? Number((receipt.pnlUsd / solPxNow).toFixed(6)) : null, // PnL in SOL at the sell
+      pid: pos.id,
+      closes: positionClosed, // this sell closed the position (one trade)
+      posPnl: positionClosed ? Number(Number(pos.realizedPnlUsd || 0).toFixed(2)) : null, // whole trade's PnL
+    });
     if (this.realizedLog.length > 20000) this.realizedLog.splice(0, this.realizedLog.length - 20000);
 
     // Evaluate streak / daily-loss limits only after this sell is in history,
@@ -1129,10 +1176,8 @@ export class CopyTradingEngine {
     }
 
     if (this.settings.risk.dailyLossLimitUsd !== null) {
-      const cutoff = Date.now() - 86_400_000;
-      const netLoss24h = this.history
-        .filter((h) => h.status === 'filled' && h.side === 'sell' && h.timestamp >= cutoff && h.pnlUsd < 0)
-        .reduce((sum, h) => sum + Math.abs(h.pnlUsd), 0);
+      // only this mode's losses (paper losses must not pause real buying, and the reverse)
+      const netLoss24h = this.realizedLoss24h(Boolean(pos.isPaper));
 
       if (netLoss24h >= this.settings.risk.dailyLossLimitUsd && !this.settings.risk.dailyLossTriggered) {
         this.settings.risk.dailyLossTriggered = true;
@@ -1154,7 +1199,9 @@ export class CopyTradingEngine {
     const before = { initialsTaken: pos.initialsTaken, timeCapExecuted: pos.timeCapExecuted, armedOrders: Array.isArray(pos.armedOrders) ? pos.armedOrders.slice() : pos.armedOrders };
     if (!pos.isPaper && pos.realTokensMissing) return null;
     const res = await this.evaluatePositionExitRules(pos, now);
-    if (res && res.ok === false && res.realFailed) Object.assign(pos, before);
+    // Any sell that did not happen (real failure, paper price-impact block, or another sell of
+    // this position still in progress) must not leave its rule marked as done.
+    if (res && res.ok === false) Object.assign(pos, before);
     return res;
   }
 
@@ -1437,6 +1484,7 @@ export class CopyTradingEngine {
     }
     const live = customMultiplierByPosId ? new Map() : await this.fetchLivePrices(realMints.filter((m) => !curves.has(m)));
 
+    const exits = [];
     for (const pos of openPositions) {
       const quote = live.get(pos.tokenAddress);
       const curve = curves.get(pos.tokenAddress);
@@ -1475,9 +1523,14 @@ export class CopyTradingEngine {
         pos.peakMarketCapUsd = pos.currentMarketCapUsd;
       }
 
-      await this.evaluatePositionExits(pos, now);
+      exits.push(this.evaluatePositionExits(pos, now));
     }
+    // Exits run side by side: one slow real sell (up to a minute) used to hold back every other
+    // position's stop-loss in the same tick. Each position still sells one at a time.
+    const settled = await Promise.allSettled(exits);
     this.emit('market_tick', { timestamp: now });
+    const failed = settled.find((r) => r.status === 'rejected');
+    if (failed) throw failed.reason;
   }
 
   /** Clears the History list only (positions, balances and follows are untouched). */
@@ -1515,6 +1568,61 @@ export class CopyTradingEngine {
   }
 
   /**
+   * PnL totals for any period, from the same log as the calendar, so every card agrees.
+   * from/to: ms timestamps (to 0 = now). Trades / wins / losses count whole trades (the sell that
+   * closed a position); older log rows without that mark count one sell as one trade.
+   */
+  pnlSummary({ from = 0, to = 0, paper = true } = {}) {
+    const end = to > 0 ? to : Infinity;
+    const px = Number(CHAINS.solana?.nativePriceUsd) || 0;
+    let realized = 0;
+    let realizedSol = 0;
+    let solExact = true;
+    let cost = 0;
+    let sells = 0;
+    let trades = 0;
+    let wins = 0;
+    let losses = 0;
+    for (const r of this.realizedLog || []) {
+      if (Boolean(r.paper) !== Boolean(paper) || !Number.isFinite(r.pnl) || r.t < from || r.t > end) continue;
+      realized += r.pnl;
+      sells += 1;
+      if (Number.isFinite(r.sol)) realizedSol += r.sol;
+      else {
+        solExact = false;
+        if (px > 0) realizedSol += r.pnl / px;
+      }
+      if (Number.isFinite(r.cost)) cost += r.cost;
+      if (r.closes === undefined) {
+        trades += 1;
+        if (r.pnl > 0) wins += 1;
+        else if (r.pnl < 0) losses += 1;
+      } else if (r.closes) {
+        trades += 1;
+        const p = Number.isFinite(r.posPnl) ? r.posPnl : r.pnl;
+        if (p > 0) wins += 1;
+        else if (p < 0) losses += 1;
+      }
+    }
+    // copied buys in the period (full history kept on the server, last 2 days)
+    const copiedBuys = (this.history || []).filter((h) => h.side === 'buy' && h.status === 'filled' && Boolean(h.isPaper) === Boolean(paper) && h.timestamp >= from && h.timestamp <= end).length;
+    return {
+      from,
+      to: to > 0 ? to : null,
+      paper: Boolean(paper),
+      copiedBuys,
+      realized: Number(realized.toFixed(2)),
+      realizedSol: Number(realizedSol.toFixed(4)),
+      solExact,
+      costSold: Number(cost.toFixed(2)),
+      sells,
+      trades,
+      wins,
+      losses,
+    };
+  }
+
+  /**
    * Realized PnL per day for one month (PnL calendar). tzOffsetMin = the browser's
    * getTimezoneOffset() (0 for UTC), so days match the user's own calendar.
    */
@@ -1534,15 +1642,20 @@ export class CopyTradingEngine {
       const day = d.getUTCDate();
       const cell = days[day] || (days[day] = { pnl: 0, trades: 0, wins: 0, losses: 0 });
       cell.pnl += r.pnl;
+      // same trade counting as pnlSummary (win-rate card): one trade = one closed position,
+      // won or lost on its whole PnL; older rows without the mark count one sell as one trade
+      const closesTrade = r.closes === undefined || r.closes;
+      if (!closesTrade) continue;
+      const tradePnl = r.closes === undefined ? r.pnl : Number.isFinite(r.posPnl) ? r.posPnl : r.pnl;
       cell.trades += 1;
-      if (r.pnl > 0) {
+      if (tradePnl > 0) {
         cell.wins += 1;
         wins.count += 1;
-        wins.usd += r.pnl;
-      } else if (r.pnl < 0) {
+        wins.usd += tradePnl;
+      } else if (tradePnl < 0) {
         cell.losses += 1;
         losses.count += 1;
-        losses.usd += r.pnl;
+        losses.usd += tradePnl;
       }
     }
     let best = null;
@@ -1590,6 +1703,21 @@ export class CopyTradingEngine {
 
   endCopiedCycle(followId, mint) {
     if (this.copiedCycles) delete this.copiedCycles[`${followId}:${mint}`];
+  }
+
+  /**
+   * Storage: closed positions and history older than `maxAgeMs` (2 days) are removed. Open
+   * positions are never touched; the PnL calendar keeps its own small log (realizedLog).
+   */
+  pruneOldRecords(maxAgeMs = 2 * 86_400_000, now = Date.now()) {
+    const cutoff = now - maxAgeMs;
+    const beforeP = this.positions.length;
+    const beforeH = this.history.length;
+    this.positions = this.positions.filter((p) => p.remainingTokens > 0 || (p.closedAt || p.lastSellAt || p.openedAt || now) >= cutoff);
+    this.history = this.history.filter((h) => (h.timestamp || now) >= cutoff);
+    const removed = { closedPositions: beforeP - this.positions.length, history: beforeH - this.history.length };
+    if (removed.closedPositions || removed.history) this.emit('records_pruned', removed);
+    return removed;
   }
 
   /** A real sell that did not go through: alert (once a minute per position), nothing booked. */

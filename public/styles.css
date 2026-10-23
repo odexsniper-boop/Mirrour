@@ -6518,3 +6518,54 @@ body, button, input, select, textarea, .kpi-label, .card-title, .term-tab {
 @media (max-width: 760px) {
   body { padding-bottom: 110px !important; }
 }
+
+/* Open position card: token icon 30% bigger (32 → 42px); fallback letter scaled too */
+.position-card .pos-identity .tok-avatar { width: 42px !important; height: 42px !important; flex-shrink: 0; }
+.position-card .pos-identity .tok-avatar b { font-size: 17px !important; }
+
+/* Open position card: token icon 20% bigger again (42 → 50px) */
+.position-card .pos-identity .tok-avatar { width: 50px !important; height: 50px !important; }
+.position-card .pos-identity .tok-avatar b { font-size: 20px !important; }
+
+/* Open position card: Paper / exit-mode tags and Initials taken / Trail armed chips without the blue tint */
+.position-card .pos-tags .tag-paper,
+.position-card .pos-tags .tag-blue,
+.position-card .state-chip.on {
+  background: rgba(255, 255, 255, 0.06) !important;
+  color: #cbd5e1 !important;
+  border-color: transparent !important;
+  box-shadow: none !important;
+}
+
+/* Closed trades pager */
+.closed-pager { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px 4px; flex-wrap: wrap; }
+.closed-pager[hidden] { display: none; }
+.closed-pager .cp-info { font-size: 12px; color: var(--text-mute, #71717a); }
+.closed-pager .cp-nums { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.closed-pager .cp-btn { min-width: 30px; height: 30px; padding: 0 9px; border-radius: 8px; border: 1px solid rgba(255,255,255,.07); background: rgba(255,255,255,.03); color: #cbd5e1; font: inherit; font-size: 12.5px; cursor: pointer; }
+.closed-pager .cp-btn:hover:not([disabled]) { background: rgba(255,255,255,.07); color: #fff; }
+.closed-pager .cp-btn.active { background: #fff; color: #000; border-color: #fff; font-weight: 600; }
+.closed-pager .cp-btn[disabled] { opacity: .35; cursor: default; }
+.closed-pager .cp-gap { color: var(--text-mute, #71717a); padding: 0 4px; }
+
+/* ===== date picker: neutral (no purple) ===== */
+.df-cal-nav-btn { color: #e5e7eb !important; border-color: rgba(255,255,255,0.12) !important; background: rgba(255,255,255,0.05) !important; }
+.df-cal-nav-btn:hover { background: rgba(255,255,255,0.12) !important; color: #fff !important; }
+.df-day-cell.today { color: #fff !important; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.45) !important; }
+.df-day-cell:hover:not(.pad) { background: rgba(255,255,255,0.10) !important; }
+.df-day-cell.range-in { background: rgba(255,255,255,0.10) !important; color: #fff !important; }
+.df-day-cell.selected, .df-day-cell.range-start, .df-day-cell.range-end { background: #fff !important; color: #0b0c10 !important; box-shadow: none !important; }
+#modal-date-filter .btn-primary { background: #fff !important; color: #0b0c10 !important; border-color: #fff !important; box-shadow: none !important; }
+#modal-date-filter .btn-primary:hover { opacity: .9; }
+
+/* ===== login box 25% smaller ===== */
+.login-card { zoom: 0.866; }
+
+/* ===== new ODEX MIRROUR logo: same height as header buttons (34px) ===== */
+.brand-logo { height: 34px !important; max-height: 34px !important; width: auto !important; }
+@media (max-width: 640px) { .brand-logo { height: 28px !important; max-height: 28px !important; } }
+
+/* ===== Live Signals: white Watch wallet button, plain "follow" tag ===== */
+#term-signals .watch-add .btn.btn-watch, .btn-watch { background: #fff !important; color: #0b0c10 !important; border: 1px solid #fff !important; box-shadow: none !important; }
+#term-signals .watch-add .btn.btn-watch:hover, .btn-watch:hover { background: #e9e9ec !important; color: #0b0c10 !important; }
+#term-signals .watch-chip em, .watch-chip em { background: transparent !important; color: var(--text-mute, #8b8d97) !important; padding: 0 !important; }

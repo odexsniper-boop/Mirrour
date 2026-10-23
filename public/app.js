@@ -31,6 +31,7 @@ function connectSseStream() {
     try {
       const payload = JSON.parse(evt.data);
       if (handleLiveSse(payload)) return;
+      if (payload.event === 'position_sold' || payload.event === 'records_pruned' || payload.event === 'state_reset' || payload.event === 'history_cleared') pnlSummary.at = 0; // refetch totals
       if (payload.state) {
         engineState = payload.state;
         renderTerminalAll();
@@ -836,6 +837,38 @@ function solChip(sol, exact, what) {
   return `<span class="closed-sol" title="${tip}"><svg width="11" height="9" aria-hidden="true"><use href="#sol-mark"/></svg>${exact ? '' : '≈'}${fmtSol(sol)} SOL</span>`;
 }
 
+// Closed trades: 15 per page; page goes back to 1 when the date / trader filter changes
+const CLOSED_PAGE_SIZE = 15;
+let closedPage = 1;
+let closedFilterKey = '';
+window.setClosedPage = function setClosedPage(n) {
+  closedPage = Math.max(1, Number(n) || 1);
+  renderClosedPositions();
+  document.getElementById('closed-tbody')?.closest('.card, section')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+};
+function renderClosedPager(total) {
+  const el = document.getElementById('closed-pager');
+  if (!el) return;
+  const pages = Math.ceil(total / CLOSED_PAGE_SIZE);
+  if (pages <= 1) {
+    el.hidden = true;
+    el.innerHTML = '';
+    return;
+  }
+  // 1 … 4 5 [6] 7 8 … 20
+  const nums = [];
+  for (let i = 1; i <= pages; i++) if (i === 1 || i === pages || Math.abs(i - closedPage) <= 2) nums.push(i);
+  const parts = [];
+  nums.forEach((n, i) => {
+    if (i && n - nums[i - 1] > 1) parts.push('<span class="cp-gap">…</span>');
+    parts.push(`<button type="button" class="cp-btn${n === closedPage ? ' active' : ''}" onclick="setClosedPage(${n})" ${n === closedPage ? 'aria-current="page"' : ''}>${n}</button>`);
+  });
+  const from = (closedPage - 1) * CLOSED_PAGE_SIZE + 1;
+  const to = Math.min(total, closedPage * CLOSED_PAGE_SIZE);
+  el.hidden = false;
+  el.innerHTML = `<span class="cp-info">${from}–${to} of ${total}</span><div class="cp-nums"><button type="button" class="cp-btn cp-nav" onclick="setClosedPage(${closedPage - 1})" ${closedPage === 1 ? 'disabled' : ''} aria-label="Previous page">‹</button>${parts.join('')}<button type="button" class="cp-btn cp-nav" onclick="setClosedPage(${closedPage + 1})" ${closedPage === pages ? 'disabled' : ''} aria-label="Next page">›</button></div>`;
+}
+
 function renderClosedPositions() {
   const tbody = document.getElementById('closed-tbody');
   const all = engineState?.closedPositions || [];
@@ -845,21 +878,34 @@ function renderClosedPositions() {
   const rows = all.filter(matchesTraderFilter).filter((r) => inDateFilter(r.closedAt || r.openedAt));
   const totals = document.getElementById('closed-totals');
   if (totals) {
-    const pnl = rows.reduce((a, r) => a + r.pnlUsd, 0);
-    const wins = rows.filter((r) => r.pnlUsd > 0).length;
-    const solRows = rows.filter((r) => r.pnlSol != null);
-    const pnlSol = solRows.reduce((a, r) => a + r.pnlSol, 0);
-    const solExact = solRows.every((r) => r.solExact);
-    totals.innerHTML = rows.length
-      ? `<span class="closed-stat">${rows.length} trade${rows.length === 1 ? '' : 's'}</span><span class="closed-stat">Win rate <strong>${Math.round((wins / rows.length) * 100)}%</strong></span><span class="closed-stat">Realized <strong class="${pnl >= 0 ? 'pos-up' : 'pos-down'}">${signedUsd(pnl)}</strong>${solRows.length ? `<span class="closed-stat-sol ${pnlSol >= 0 ? 'pos-up' : 'pos-down'}">${solExact ? '' : '≈'}${signedSol(pnlSol)}</span>` : ''}</span>`
+    // Totals come from the PnL log (same as the cards and the calendar); with a trader filter the
+    // listed rows are summed instead
+    const S = !traderFilter ? currentPnlSummary() : null;
+    const count = S ? S.trades : rows.length;
+    const pnl = S ? S.realized : rows.reduce((a, r) => a + r.pnlUsd, 0);
+    const wins = S ? S.wins : rows.filter((r) => r.pnlUsd > 0).length;
+    const solRows = S ? [1] : rows.filter((r) => r.pnlSol != null);
+    const pnlSol = S ? S.realizedSol : solRows.reduce((a, r) => a + r.pnlSol, 0);
+    const solExact = S ? S.solExact : solRows.every((r) => r.solExact);
+    totals.title = S ? 'All trades closed in this period (the list below keeps the last 2 days)' : '';
+    totals.innerHTML = count
+      ? `<span class="closed-stat">${count} trade${count === 1 ? '' : 's'}</span><span class="closed-stat">Win rate <strong>${Math.round((wins / count) * 100)}%</strong></span><span class="closed-stat">Realized <strong class="${pnl >= 0 ? 'pos-up' : 'pos-down'}">${signedUsd(pnl)}</strong>${solRows.length ? `<span class="closed-stat-sol ${pnlSol >= 0 ? 'pos-up' : 'pos-down'}">${solExact ? '' : '≈'}${signedSol(pnlSol)}</span>` : ''}</span>`
       : '';
   }
+  const fk = `${dateFilterState.preset}|${traderFilter?.label || ''}|${JSON.stringify(activeDateRange())}`;
+  if (fk !== closedFilterKey) {
+    closedFilterKey = fk;
+    closedPage = 1;
+  }
+  closedPage = Math.min(closedPage, Math.max(1, Math.ceil(rows.length / CLOSED_PAGE_SIZE)));
+  renderClosedPager(rows.length);
   if (!rows.length) {
     tbody.__lastHtml = null;
     tbody.innerHTML = emptyRowHtml(6, traderFilter ? `No closed trades from ${esc(traderFilter.label)}${dateFilterState.preset !== 'all' ? ` ${dateFilterPhrase()}` : ''}` : dateFilterState.preset !== 'all' && all.length ? `No closed trades ${dateFilterPhrase()}` : 'No closed trades yet', 'When a copied position is fully sold (by your exit rules, a mirror sell or by hand) it shows up here with what you paid, what came back and the result.');
     return;
   }
   setHtml(tbody, rows
+    .slice((closedPage - 1) * CLOSED_PAGE_SIZE, closedPage * CLOSED_PAGE_SIZE)
     .map((r) => {
       const up = r.pnlUsd >= 0;
       const held = r.closedAt ? durationShort(r.closedAt - r.openedAt) : '—';
@@ -910,6 +956,49 @@ function pnlAmount(usd) {
   return signedUsd(usd);
 }
 
+// ---------------------------------------------------------------------------
+// One source for every PnL figure: the server's permanent PnL log (same as the calendar).
+// Cards ask for the totals of the selected period + mode; refreshed after each sell.
+// ---------------------------------------------------------------------------
+let pnlSummary = { key: '', data: null, at: 0, loading: '' };
+function pnlSummaryKey() {
+  const r = activeDateRange();
+  const all = dateFilterState.preset === 'all';
+  const from = all ? 0 : Number(r.startDate) || 0;
+  const to = all ? 0 : Number(r.endDate) || 0;
+  const mode = engineState?.settings?.paperTrading === false ? 'real' : 'paper';
+  return { key: `${from}|${to}|${mode}`, from, to, mode };
+}
+function currentPnlSummary() {
+  const k = pnlSummaryKey();
+  if (pnlSummary.key === k.key && pnlSummary.data) {
+    if (Date.now() - pnlSummary.at > 15_000) refreshPnlSummary();
+    return pnlSummary.data;
+  }
+  refreshPnlSummary();
+  return null;
+}
+async function refreshPnlSummary() {
+  const k = pnlSummaryKey();
+  if (pnlSummary.loading === k.key) return;
+  pnlSummary.loading = k.key;
+  try {
+    const q = new URLSearchParams({ from: String(k.from), to: String(k.to), mode: k.mode });
+    const d = await (await fetch(`/api/pnl/summary?${q}`)).json();
+    if (d.ok && pnlSummaryKey().key === k.key) {
+      pnlSummary = { key: k.key, data: d, at: Date.now(), loading: '' };
+      if (engineState) {
+        renderKpiStrip();
+        renderClosedPositions();
+      }
+    }
+  } catch {
+    // keep the last figures; retried on the next render
+  } finally {
+    if (pnlSummary.loading === k.key) pnlSummary.loading = '';
+  }
+}
+
 function renderKpiStrip() {
   const wallets = engineState.wallets.filter((w) => !w.archived);
   const activeWallet = wallets.find((w) => w.active) || wallets[0];
@@ -937,11 +1026,8 @@ function renderKpiStrip() {
   const actWalletSubEl = document.getElementById('kpi-active-wallet-sub');
   if (actWalletSubEl) {
     if (hasDateFilter) {
-      const periodHistory = engineState.history.filter((h) => h.timestamp >= filterStart && h.timestamp <= filterEnd);
-      const periodRealized = periodHistory
-        .filter((h) => h.status === 'filled' && h.side === 'sell' && typeof h.pnlUsd === 'number')
-        .reduce((sum, h) => sum + h.pnlUsd, 0);
-      const sign = periodRealized >= 0 ? '+' : '';
+      const S = currentPnlSummary();
+      const periodRealized = S ? S.realized : 0;
       actWalletSubEl.textContent = `${activeWallet.name} · ${filterLabel}: ${signedUsd(periodRealized)} realized`;
     } else {
       actWalletSubEl.textContent = paperMode
@@ -978,10 +1064,9 @@ function renderKpiStrip() {
   const pnlSubEl = document.getElementById('kpi-pnl-sub');
   if (hasDateFilter) {
     if (pnlLabelEl) pnlLabelEl.textContent = 'Period PnL';
-    const periodHistory = engineState.history.filter((h) => h.timestamp >= filterStart && h.timestamp <= filterEnd);
-    const periodRealized = periodHistory
-      .filter((h) => h.status === 'filled' && h.side === 'sell' && typeof h.pnlUsd === 'number')
-      .reduce((sum, h) => sum + h.pnlUsd, 0);
+    // realized: the permanent PnL log (exactly what the calendar shows for these days)
+    const S = currentPnlSummary();
+    const periodRealized = S ? S.realized : 0;
 
     const periodPositions = engineState.positions.filter(
       (p) => p.openedAt >= filterStart && p.openedAt <= filterEnd && p.remainingTokens > 0
@@ -989,9 +1074,8 @@ function renderKpiStrip() {
     const periodUnrealized = periodPositions.reduce((sum, p) => sum + (p.unrealizedPnlUsd || 0), 0);
     const totalPeriodPnl = periodRealized + periodUnrealized;
 
-    // % of the money put in during the period (buys made in it), else of what is still open
-    const periodBuysUsd = periodHistory.filter((h) => h.status === 'filled' && h.side === 'buy').reduce((sum, h) => sum + (Number(h.amountUsd) || 0), 0);
-    const periodCost = periodBuysUsd || periodPositions.reduce((sum, p) => sum + (p.remainingCostUsd || 0), 0);
+    // % of the money behind it: cost of what was sold in the period + cost of what is still open
+    const periodCost = (S ? S.costSold : 0) + periodPositions.reduce((sum, p) => sum + (p.remainingCostUsd || 0), 0);
     const pct = periodCost > 0 ? (totalPeriodPnl / periodCost) * 100 : 0;
     const sign = totalPeriodPnl >= 0 ? '+' : '';
 
@@ -1021,11 +1105,13 @@ function renderKpiStrip() {
   if (pnlEl) pnlEl.title = pnlUnit === 'sol' ? 'In SOL at the live SOL price · click for USD' : 'Click to show in SOL';
 
   // Card 5: win rate of the trades closed in the date filter's period (All time = historical)
-  const closedAll = (engineState.closedPositions || []).filter((c) => inDateFilter(c.closedAt || c.openedAt));
+  // from the PnL log too: every trade closed in the period, also those older than the 2-day list
+  const WS = currentPnlSummary();
+  const closedAll = WS ? { length: WS.trades } : (engineState.closedPositions || []).filter((c) => inDateFilter(c.closedAt || c.openedAt));
   const wrLabel = document.getElementById('kpi-winrate-label');
   if (wrLabel) wrLabel.textContent = dateFilterState.preset === 'all' ? 'Historical win rate' : 'Win rate';
-  const winsAll = closedAll.filter((c) => c.pnlUsd > 0).length;
-  const lossesAll = closedAll.filter((c) => c.pnlUsd < 0).length;
+  const winsAll = WS ? WS.wins : closedAll.filter((c) => c.pnlUsd > 0).length;
+  const lossesAll = WS ? WS.losses : closedAll.filter((c) => c.pnlUsd < 0).length;
   const wrEl = document.getElementById('kpi-winrate');
   const wrSub = document.getElementById('kpi-winrate-sub');
   if (wrEl) {
@@ -1043,10 +1129,11 @@ function renderKpiStrip() {
   const pumpBadgeEl = document.getElementById('kpi-pump-only-badge');
 
   if (hasDateFilter) {
-    const periodHistory = engineState.history.filter((h) => h.timestamp >= filterStart && h.timestamp <= filterEnd);
+    const CS = currentPnlSummary();
+    const copied = CS ? CS.copiedBuys : engineState.history.filter((h) => h.side === 'buy' && h.status === 'filled' && h.timestamp >= filterStart && h.timestamp <= filterEnd).length;
     if (folCountEl) folCountEl.textContent = String(totalFollows);
     if (pumpBadgeEl) {
-      pumpBadgeEl.textContent = `${copyingFollows} copying · ${periodHistory.length} copy trades in ${filterLabel}`;
+      pumpBadgeEl.textContent = `${copyingFollows} copying · ${copied} copied buy${copied === 1 ? '' : 's'} in ${filterLabel}`;
     }
   } else {
     if (folCountEl) folCountEl.textContent = String(totalFollows);
@@ -1149,7 +1236,7 @@ function renderPositionsList() {
         <article class="position-card ${up ? 'is-up' : 'is-down'}">
           <div class="pos-top-row">
             <div class="pos-identity">
-              ${tokenAvatar(p.imageUrl, p.symbol, 32, p.tokenAddress)}
+              ${tokenAvatar(p.imageUrl, p.symbol, 42, p.tokenAddress)}
               ${chainBadgeHtml(p.chainId)}
               <span class="pos-symbol">${tokenLinkHtml(p.symbol, p.tokenAddress)}</span>
               <span class="pos-name-leader">${esc(p.name)} <span class="sep">·</span> copied ${walletAvatar(traderWalletOf(p), p.traderHandle, 16, 'w-avatar-xs')} ${traderLinkHtml(p.traderHandle, traderWalletOf(p))}</span>

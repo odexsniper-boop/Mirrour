@@ -139,6 +139,7 @@ export class RealTrader {
     this.lastError = null;
     this.balance = null; // { sol, usdc, at }
     this.sellBlockedUntil = new Map(); // mint -> time (back-off after a failed sell)
+    this.pendingBuySol = 0; // SOL of buys signed/sending but not finished yet
   }
 
   get address() {
@@ -350,6 +351,15 @@ export class RealTrader {
 
     // ----- buy limits -----
     let solIn = 0;
+    let reserved = null; // this buy's entry in the daily-cap log
+    let pendingAdded = 0; // this buy's SOL counted as "in progress"
+    // a buy that never went out gives its daily-cap room back
+    const release = (result) => {
+      if (reserved) this.spendLog = this.spendLog.filter((x) => x !== reserved);
+      reserved = null;
+      return result;
+    };
+    try {
     if (side === 'buy') {
       solIn = amountUsd / px;
       if (this.caps.maxSolPerTrade > 0 && solIn > this.caps.maxSolPerTrade + 1e-9) {
@@ -359,13 +369,23 @@ export class RealTrader {
       if (this.caps.maxSolPerDay > 0 && spent + solIn > this.caps.maxSolPerDay + 1e-9) {
         return this.fail(`daily limit reached: ${spent.toFixed(3)} of ${this.caps.maxSolPerDay} SOL spent in the last 24 h`);
       }
+      // Count the buy against the daily cap right away, before any await: two buys running at
+      // the same time could otherwise both pass the check and go over the cap together.
+      reserved = { t: this.now(), sol: solIn };
+      this.spendLog.push(reserved);
       try {
         const bal = await this.refreshBalance();
-        const needSol = (quoteMint === WSOL_MINT ? solIn : 0) + this.caps.reserveSol;
-        if (bal.sol < needSol) return this.fail(`not enough SOL: wallet has ${bal.sol.toFixed(4)}, needs ${needSol.toFixed(4)} (incl. ${this.caps.reserveSol} SOL kept for fees)`);
-        if (quoteMint === USDC_MINT && bal.usdc < amountUsd) return this.fail(`not enough USDC: wallet has ${bal.usdc.toFixed(2)}`);
+        // SOL already promised to other buys still in progress is not spendable
+        const pendingSol = quoteMint === WSOL_MINT ? this.pendingBuySol : 0;
+        const needSol = (quoteMint === WSOL_MINT ? solIn : 0) + pendingSol + this.caps.reserveSol;
+        if (bal.sol < needSol) return release(this.fail(`not enough SOL: wallet has ${bal.sol.toFixed(4)}, needs ${needSol.toFixed(4)} (incl. ${this.caps.reserveSol} SOL kept for fees${pendingSol > 0 ? `, ${pendingSol.toFixed(4)} SOL for buys in progress` : ''})`));
+        if (quoteMint === USDC_MINT && bal.usdc < amountUsd) return release(this.fail(`not enough USDC: wallet has ${bal.usdc.toFixed(2)}`));
       } catch (err) {
-        return this.fail(`could not read wallet balance: ${err.message}`);
+        return release(this.fail(`could not read wallet balance: ${err.message}`));
+      }
+      if (quoteMint === WSOL_MINT) {
+        pendingAdded = solIn;
+        this.pendingBuySol += solIn;
       }
     }
 
@@ -379,19 +399,18 @@ export class RealTrader {
       }
     } catch (err) {
       if (side === 'sell') this.sellBlockedUntil.set(mint, this.now() + this.caps.sellRetrySec * 1000);
-      return this.fail(err.message);
+      // keep the reason flags: the engine pauses exits when the tokens are gone from the wallet
+      return release(this.fail(err.message, { backoff: Boolean(err.backoff), noTokens: Boolean(err.noTokens) }));
     }
 
     let signed;
     try {
       signed = signTransactionBase64(order.transaction, this.keypair);
     } catch (err) {
-      return this.fail(`signing failed: ${err.message}`);
+      return release(this.fail(`signing failed: ${err.message}`));
     }
-
-    // count the buy against the daily cap before sending (a lost response must not reopen the cap)
-    const reserved = side === 'buy' ? { t: this.now(), sol: solIn } : null;
-    if (reserved) this.spendLog.push(reserved);
+    // from here on the buy may reach the chain: it stays counted against the daily cap unless
+    // it is known not to have landed (a lost response must not reopen the cap)
 
     let exec = null;
     let execErr = null;
@@ -414,7 +433,7 @@ export class RealTrader {
       }
     }
     if (!landed) {
-      if (reserved) this.spendLog = this.spendLog.filter((x) => x !== reserved); // a swap that did not land does not use up the daily cap
+      release(); // a swap that did not land does not use up the daily cap
       if (side === 'sell') this.sellBlockedUntil.set(mint, this.now() + this.caps.sellRetrySec * 1000);
       const why = exec?.error || (exec?.code !== undefined ? `Jupiter code ${exec.code}` : execErr?.message || 'swap failed');
       this.record({ side, mint, symbol: token.symbol, signature, ok: false, error: why });
@@ -491,6 +510,12 @@ export class RealTrader {
     this.record({ side, mint, symbol: token.symbol, signature, ok: true, estimated: Boolean(fill.estimated), usd: Number((side === 'buy' ? result.spentUsd : result.receivedUsd).toFixed(4)), networkFeeUsd: Number(networkFeeUsd.toFixed(4)) });
     this.refreshBalance().catch(() => {});
     return result;
+    } finally {
+      if (pendingAdded) {
+        this.pendingBuySol -= pendingAdded;
+        if (this.pendingBuySol < 1e-9) this.pendingBuySol = 0; // no float leftovers
+      }
+    }
   }
 
   /** Poll signature status: 'success' | 'failed' | 'unknown'. */

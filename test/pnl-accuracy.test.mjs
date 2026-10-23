@@ -161,3 +161,44 @@ test('one copy per trader position: top-ups are not copied until the trader full
   await e.processTraderSignal(buy(0.03));
   assert.equal(e.positions.length, 3);
 });
+
+test('storage: closed trades and history older than 2 days are removed; open positions and the PnL calendar log stay', async () => {
+  const { e, f } = setup();
+  e.settings.copyTopUps = true;
+  await e.processTraderSignal(sig(f, { address: 'oldMint', traderFillPriceUsd: 0.00002, currentPriceUsd: 0.00002 }));
+  await e.executePositionSell(e.positions[0].id, { sellPct: 100 });
+  await e.processTraderSignal(sig(f, { address: 'openMint2', traderFillPriceUsd: 0.00002, currentPriceUsd: 0.00002 }));
+  const logBefore = e.realizedLog.length;
+  const later = Date.now() + 2 * 86_400_000 + 60_000;
+  const r = e.pruneOldRecords(2 * 86_400_000, later);
+  assert.equal(r.closedPositions, 1);
+  assert.ok(r.history >= 2);
+  assert.equal(e.positions.length, 1, 'open position kept');
+  assert.ok(e.positions[0].remainingTokens > 0);
+  assert.equal(e.realizedLog.length, logBefore, 'PnL calendar history kept');
+});
+
+test('PnL figures agree: period summary = calendar = sum of closed trades; partial sells count as one trade', async () => {
+  const { e, f } = setup();
+  e.settings.copyTopUps = true;
+  const results = [];
+  for (const [i, mult] of [1.4, 0.7, 1.1].entries()) {
+    await e.processTraderSignal(sig(f, { address: `syncMint${i}`, traderFillPriceUsd: 0.00002, currentPriceUsd: 0.00002 }));
+    const p = e.positions[0];
+    p.currentPriceUsd = p.entryPriceUsd * mult;
+    await e.executePositionSell(p.id, { sellPct: 50 }); // partial
+    await e.executePositionSell(p.id, { sellPct: 100 }); // rest
+    results.push(p);
+  }
+  const s = e.pnlSummary({ from: 0, to: 0, paper: true });
+  const fromPositions = results.reduce((a, p) => a + (p.soldUsd - p.initialCostUsd), 0);
+  const now = new Date();
+  const cal = e.pnlCalendar({ year: now.getUTCFullYear(), month: now.getUTCMonth() + 1, tzOffsetMin: 0, paper: true });
+  assert.ok(Math.abs(s.realized - fromPositions) <= 0.03, `summary ${s.realized} vs positions ${fromPositions}`);
+  assert.ok(Math.abs(s.realized - cal.total) < 0.005, `summary ${s.realized} vs calendar ${cal.total}`);
+  assert.equal(s.trades, 3, 'three trades, not six sells');
+  assert.equal(s.sells, 6);
+  assert.equal(s.wins, 2);
+  assert.equal(s.losses, 1);
+  assert.equal(s.copiedBuys, 3);
+});

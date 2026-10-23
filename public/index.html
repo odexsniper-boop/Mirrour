@@ -5,10 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>odex mirror — Real-time Copy Trading</title>
   <meta name="theme-color" content="#060813" />
-  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
-  <link rel="icon" type="image/png" sizes="64x64" href="/favicon-64.png" />
-  <link rel="icon" href="/favicon.ico" sizes="any" />
-  <link rel="apple-touch-icon" href="/favicon-180.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png?v=2" />
+  <link rel="icon" type="image/png" sizes="64x64" href="/favicon-64.png?v=2" />
+  <link rel="icon" href="/favicon.ico?v=2" sizes="any" />
+  <link rel="apple-touch-icon" href="/favicon-180.png?v=2" />
   <link rel="preload" href="/fonts/Geist-Variable.woff2" as="font" type="font/woff2" crossorigin />
   <link rel="stylesheet" href="/styles.css" />
 </head>
@@ -54,7 +54,7 @@
   <!-- Top Navigation Bar -->
   <header class="topbar">
     <div class="brand-wrapper">
-      <img class="brand-logo" src="/logo.png" alt="odex mirror" />
+      <img class="brand-logo" src="/logo.png?v=2" alt="odex mirror" />
     </div>
 
     <!-- Global search -->
@@ -363,6 +363,7 @@
               <tbody id="closed-tbody"></tbody>
             </table>
           </div>
+          <div class="closed-pager" id="closed-pager" hidden></div>
         </div>
       </div>
 
@@ -462,25 +463,25 @@
         </div>
         <div class="cfg-layout">
           <nav class="cfg-nav" aria-label="Settings sections">
-            <button type="button" class="cfg-nav-btn active" data-cfg="copytrades" onclick="openSettingsSection('copytrades')">
-              <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg></span><span class="cfg-nav-txt"><strong>Copytrades</strong><small>Traders you copy & exit rules</small></span>
-            </button>
-            <button type="button" class="cfg-nav-btn" data-cfg="trading" onclick="openSettingsSection('trading')">
-              <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span><span class="cfg-nav-txt"><strong>Trading & risk</strong><small>Slippage, filters, limits</small></span>
-            </button>
-            <button type="button" class="cfg-nav-btn" data-cfg="data" onclick="openSettingsSection('data')">
-              <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></span><span class="cfg-nav-txt"><strong>Data & storage</strong><small>Database, backups, Supabase</small></span>
-            </button>
             <button type="button" class="cfg-nav-btn" data-cfg="profile" onclick="openSettingsSection('profile')">
               <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></span><span class="cfg-nav-txt"><strong>Profile</strong><small>Name, time, start page</small></span>
             </button>
             <button type="button" class="cfg-nav-btn" data-cfg="security" onclick="openSettingsSection('security')">
               <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></span><span class="cfg-nav-txt"><strong>Security</strong><small>Access, keys, confirmations</small></span>
             </button>
+            <button type="button" class="cfg-nav-btn" data-cfg="trading" onclick="openSettingsSection('trading')">
+              <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></span><span class="cfg-nav-txt"><strong>Trading & risk</strong><small>Slippage, filters, limits</small></span>
+            </button>
             <button type="button" class="cfg-nav-btn" data-cfg="notifications" onclick="openSettingsSection('notifications')">
               <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span><span class="cfg-nav-txt"><strong>Notifications</strong><small>Pop-ups and sound</small></span>
             </button>
-          </nav>
+            <button type="button" class="cfg-nav-btn" data-cfg="data" onclick="openSettingsSection('data')">
+              <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></span><span class="cfg-nav-txt"><strong>Data & storage</strong><small>Database, backups, Supabase</small></span>
+            </button>
+            <button type="button" class="cfg-nav-btn active" data-cfg="copytrades" onclick="openSettingsSection('copytrades')">
+              <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg></span><span class="cfg-nav-txt"><strong>Copytrades</strong><small>Traders you copy & exit rules</small></span>
+            </button>
+</nav>
           <div class="cfg-body">
             <section class="cfg-section active" data-cfg="copytrades" id="term-follows">
         <div class="card">

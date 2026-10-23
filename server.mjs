@@ -185,6 +185,18 @@ setInterval(async () => {
   }
 }, 2000);
 
+// Storage: closed trades + history older than 2 days are cleared (at start, then every 30 min)
+function pruneOld() {
+  try {
+    const r = engine.pruneOldRecords(Number(process.env.ODEX_KEEP_CLOSED_HOURS || 48) * 3600_000);
+    if (r.closedPositions || r.history) console.log(`Storage: removed ${r.closedPositions} closed trade(s) and ${r.history} history row(s) older than 2 days`);
+  } catch (err) {
+    console.error(`Storage cleanup failed: ${err.message}`);
+  }
+}
+pruneOld();
+setInterval(pruneOld, 30 * 60_000).unref?.();
+
 // Safety net: a stray async error is logged instead of stopping the whole server
 process.on('unhandledRejection', (err) => {
   console.error(`Unhandled error (server kept running): ${redact(err?.stack || err?.message || String(err), alchemy.apiKey)}`);
@@ -948,6 +960,13 @@ export const server = http.createServer(async (req, res) => {
       } catch (err) {
         return sendJson(res, 400, { ok: false, error: err.message });
       }
+    }
+
+    // PnL totals for a period (Period PnL card, win rate, Closed totals) — same log as the calendar
+    if (pathname === '/api/pnl/summary' && req.method === 'GET') {
+      const from = Math.max(0, Number(url.searchParams.get('from')) || 0);
+      const to = Math.max(0, Number(url.searchParams.get('to')) || 0);
+      return sendJson(res, 200, { ok: true, ...engine.pnlSummary({ from, to, paper: url.searchParams.get('mode') !== 'real' }) });
     }
 
     // 9.33 PnL calendar: realized PnL per day for a month

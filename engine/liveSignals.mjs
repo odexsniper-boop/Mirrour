@@ -232,7 +232,19 @@ export class LiveSignalService {
   }
 
   async handleSignal(sig) {
-    if (this.signals.some((s) => s.signature === sig.signature)) return;
+    // a signal is only added to the list after it has been copied (seconds later), so also
+    // remember the ones being handled right now: the same trade must never be copied twice
+    if (!this.handling) this.handling = new Set();
+    if (this.handling.has(sig.signature) || this.signals.some((s) => s.signature === sig.signature)) return;
+    this.handling.add(sig.signature);
+    try {
+      return await this.handleSignalNow(sig);
+    } finally {
+      this.handling.delete(sig.signature);
+    }
+  }
+
+  async handleSignalNow(sig) {
     // dust (under $1) is never a real copy-worthy trade; keep it out of the feed
     if (!(Number(sig.usdValue) >= 1)) {
       (this.dustSigs || (this.dustSigs = new Set())).add(sig.signature); // remembered for the missed-trade audit
