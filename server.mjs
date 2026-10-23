@@ -194,6 +194,13 @@ function pruneOld() {
     console.error(`Storage cleanup failed: ${err.message}`);
   }
 }
+// trader scorecard: give older PnL-log rows their trader + hold time (before old trades are cleared)
+try {
+  const n = engine.backfillScorecardLog();
+  if (n) console.log(`Scorecard: filled in ${n} older trades`);
+} catch {
+  // never block startup
+}
 pruneOld();
 setInterval(pruneOld, 30 * 60_000).unref?.();
 
@@ -486,6 +493,30 @@ export const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: checks.every((c) => c.ok), checkedAt: now, checks });
     }
 
+    // Phantom deposits: the browser builds a plain SOL transfer and Phantom signs + sends it.
+    // The server only hands out a recent blockhash and reports a signature's status (read-only).
+    if (req.method === 'GET' && pathname === '/api/solana/blockhash') {
+      try {
+        const r = await liveSignals.watcher.rpc('getLatestBlockhash', [{ commitment: 'confirmed' }]);
+        const v = r?.value || r;
+        if (!v?.blockhash) throw new Error('no blockhash');
+        return sendJson(res, 200, { ok: true, blockhash: v.blockhash, lastValidBlockHeight: v.lastValidBlockHeight ?? null });
+      } catch (err) {
+        return sendJson(res, 200, { ok: false, error: alchemy.maskUrl(err.message) });
+      }
+    }
+    if (req.method === 'GET' && pathname === '/api/solana/tx-status') {
+      const sig = url.searchParams.get('sig') || '';
+      if (!/^[1-9A-HJ-NP-Za-km-z]{60,100}$/.test(sig)) return sendJson(res, 400, { ok: false, error: 'Invalid signature.' });
+      try {
+        const r = await liveSignals.watcher.rpc('getSignatureStatuses', [[sig], { searchTransactionHistory: true }]);
+        const st = r?.value?.[0] || null;
+        return sendJson(res, 200, { ok: true, status: !st ? 'pending' : st.err ? 'failed' : st.confirmationStatus === 'confirmed' || st.confirmationStatus === 'finalized' ? 'confirmed' : 'pending' });
+      } catch (err) {
+        return sendJson(res, 200, { ok: false, error: alchemy.maskUrl(err.message) });
+      }
+    }
+
     // Real trading: status (never includes the key) and a safe self-test that sends nothing
     if (req.method === 'GET' && pathname === '/api/real/status') {
       if (engine.realTradingActive()) await refreshRealBalance();
@@ -596,8 +627,10 @@ export const server = http.createServer(async (req, res) => {
 
       if (req.method === 'POST' && followId === 'resume-all') {
         for (const f of engine.follows) {
+          if (f.pauseReason === 'slow') f.scoreSince = Date.now(); // judge it again on fresh trades
           f.status = 'copying';
           f.pauseReason = null;
+          f.pauseDetail = null;
           f.consecutiveLosses = 0;
         }
         engine.emit('follows_updated', {});
@@ -633,7 +666,9 @@ export const server = http.createServer(async (req, res) => {
         if (body.status) {
           follow.status = body.status;
           if (body.status === 'copying') {
+            if (follow.pauseReason === 'slow') follow.scoreSince = Date.now(); // judge it again on fresh trades
             follow.pauseReason = null;
+            follow.pauseDetail = null;
             follow.consecutiveLosses = 0;
           }
         }
@@ -806,6 +841,15 @@ export const server = http.createServer(async (req, res) => {
           engine.settings.cooldown = { ...engine.settings.cooldown, ...body.cooldown };
         }
         if (body.copyTopUps !== undefined) engine.settings.copyTopUps = Boolean(body.copyTopUps);
+        if (body.scorecard && typeof body.scorecard === 'object') {
+          const sc = { ...engine.scorecardSettings() };
+          if (body.scorecard.autoPause !== undefined) sc.autoPause = Boolean(body.scorecard.autoPause);
+          for (const [k, lo, hi] of [['minTrades', 3, 1000], ['maxSlipPct', 1, 500], ['maxLagSec', 1, 600]]) {
+            const v = Number(body.scorecard[k]);
+            if (body.scorecard[k] !== undefined && body.scorecard[k] !== '' && Number.isFinite(v)) sc[k] = Math.min(hi, Math.max(lo, v));
+          }
+          engine.settings.scorecard = sc;
+        }
         if (body.retryBuys !== undefined) {
           engine.settings.retryBuys = Boolean(body.retryBuys);
         }
@@ -900,12 +944,14 @@ export const server = http.createServer(async (req, res) => {
       } else if (action === 'link-external') {
         const provider = String(body.provider || 'phantom');
         const address = String(body.address || '').trim();
-        if (provider !== 'phantom') return sendJson(res, 400, { ok: false, error: 'Only Phantom linking is supported.' });
+        const names = { phantom: 'Phantom', metamask: 'MetaMask' };
+        if (!names[provider]) return sendJson(res, 400, { ok: false, error: 'Only Phantom and MetaMask linking are supported.' });
         if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) {
-          return sendJson(res, 400, { ok: false, error: 'Phantom returned an invalid Solana address.' });
+          return sendJson(res, 400, { ok: false, error: `${names[provider]} returned an invalid Solana address.` });
         }
-        engine.settings.externalWallets = engine.settings.externalWallets || {};
-        engine.settings.externalWallets.phantom = { address, linkedAt: Date.now() };
+        // one linked wallet at a time (it is the deposit address and the balance shown)
+        engine.settings.externalWallets = {};
+        engine.settings.externalWallets[provider] = { address, linkedAt: Date.now() };
       } else if (action === 'paper-funds') {
         // Paper trading money (USD) — what paper copies spend; never real funds
         const w = engine.getWalletById(body.walletId) || engine.getActiveWallet();
@@ -923,7 +969,11 @@ export const server = http.createServer(async (req, res) => {
         if (address && !isSolanaAddress(address)) return sendJson(res, 400, { ok: false, error: 'That is not a valid Solana address.' });
         w.solanaAddress = address;
       } else if (action === 'unlink-external') {
-        if (engine.settings.externalWallets) delete engine.settings.externalWallets.phantom;
+        if (engine.settings.externalWallets) {
+          const provider = String(body.provider || '');
+          if (provider) delete engine.settings.externalWallets[provider];
+          else engine.settings.externalWallets = {};
+        }
       }
 
       engine.emit('wallets_updated', {});

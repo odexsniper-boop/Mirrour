@@ -103,6 +103,7 @@ export class WalletStream {
   status() {
     return {
       enabled: this.running,
+      provider: /helius-rpc\.com/i.test(this.url || '') ? 'helius' : /alchemy\.com/i.test(this.url || '') ? 'alchemy' : /mainnet-beta\.solana\.com/i.test(this.url || '') ? 'public' : 'custom',
       supported: this.supported,
       connected: this.stats.connected,
       connectedAt: this.stats.connectedAt,

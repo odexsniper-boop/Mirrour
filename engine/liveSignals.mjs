@@ -42,6 +42,7 @@ export class LiveSignalService {
       realtime: env.ODEX_STREAM !== '0',
       manual: [], // [{ address, label }]
     };
+    const heliusKey = String(env.HELIUS_API_KEY || '').trim() || null;
     this.watcher =
       watcher ||
       new SolanaWalletWatcher({
@@ -49,8 +50,18 @@ export class LiveSignalService {
         pollIntervalMs: this.config.pollSec * 1000,
         tokenInfo: new TokenInfoService({ metadata: alchemy }),
         stream: this.config.realtime,
-        redactUrl: (x) => redact(x, alchemy?.apiKey),
+        // Helius: live push of trades and balances (it supports logsSubscribe and accountSubscribe,
+        // so spam-flooded wallets are watched on the same fast connection). Normal requests stay on
+        // the RPC above (Alchemy's free tier allows more requests per second).
+        ...(heliusKey
+          ? {
+              streamUrl: `wss://mainnet.helius-rpc.com/?api-key=${heliusKey}`,
+              balanceWsUrl: env.SOLANA_BALANCE_WS_URL || `wss://mainnet.helius-rpc.com/?api-key=${heliusKey}`,
+            }
+          : {}),
+        redactUrl: (x) => redact(redact(x, alchemy?.apiKey), heliusKey),
       });
+    this.heliusKey = heliusKey;
     this.watcher.onSignal = (s) => this.handleSignal(s);
     this.watcher.onStatus = () => this.pushStatus();
     this.watcher.onTokenInfoLate = (mint, info) => this.applyLateTokenInfo(mint, info);
@@ -314,7 +325,8 @@ export class LiveSignalService {
     return {
       mode: 'signals-only',
       config: { ...this.config, rpcUrl: this.maskedRpcUrl(), rpcProvider: this.rpcProvider(), manual: [...this.config.manual] },
-      status: { ...status, rpcUrl: redact(status.rpcUrl, key), lastError: status.lastError ? redact(status.lastError, key) : null },
+      status: { ...status, rpcUrl: redact(redact(status.rpcUrl, key), this.heliusKey), lastError: status.lastError ? redact(redact(status.lastError, key), this.heliusKey) : null },
+      helius: { configured: Boolean(this.heliusKey) },
       alchemy: this.alchemy ? this.alchemy.status() : { configured: false },
       watchList: this.watchList(),
       ...(includeSignals ? { signals: this.signals } : {}),

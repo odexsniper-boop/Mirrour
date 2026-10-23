@@ -61,6 +61,15 @@ export function activeExitRuleCount(rules) {
   return Object.values(rules || {}).filter((r) => r && r.enabled).length;
 }
 
+export function createDefaultScorecardSettings() {
+  return {
+    autoPause: true,
+    minTrades: 10, // judge a trader only after this many closed copies
+    maxSlipPct: 20, // round-trip slip: how much worse our entry + exit were than the trader's
+    maxLagSec: 10, // average seconds from the trader's trade to our copy
+  };
+}
+
 export function createDefaultUiSettings() {
   return {
     displayName: '',
@@ -156,6 +165,8 @@ export class CopyTradingEngine {
       // One copy per trader position: once a trader's entry in a coin is copied, their further
       // buys of that coin (top-ups) are not copied until they fully sell. true = copy every buy.
       copyTopUps: false,
+      // Trader scorecard: pause a trader the bot can't keep up with (judged on the last trades)
+      scorecard: createDefaultScorecardSettings(),
       cooldown: {
         enabled: true,
         mode: 'duration', // 'duration' | 'while_holding'
@@ -769,6 +780,10 @@ export class CopyTradingEngine {
             : null,
       tradingAssetUsed: assetMode,
       entryPriceUsd: execResult.fillPriceUsd,
+      // scorecard: how far behind the trader this copy got in
+      traderEntryPriceUsd: traderFillPrice > 0 ? traderFillPrice : null,
+      entrySlipPct: traderFillPrice > 0 ? Number(((execResult.fillPriceUsd / traderFillPrice - 1) * 100).toFixed(2)) : null,
+      detectLagSec: Number.isFinite(Number(signal.ageSec)) ? Number(Number(signal.ageSec).toFixed(1)) : null,
       currentPriceUsd: execResult.fillPriceUsd,
       peakPriceUsd: execResult.fillPriceUsd,
       entryMarketCapUsd: entryMc,
@@ -881,6 +896,7 @@ export class CopyTradingEngine {
     return this.executePositionSell(pos.id, {
       sellPct,
       cause: 'Mirror sell',
+      traderExitPriceUsd: Number(signal.token?.traderFillPriceUsd) || null,
     });
   }
 
@@ -896,7 +912,7 @@ export class CopyTradingEngine {
     }
   }
 
-  async executePositionSellNow(positionId, { sellPct = 100, exactTokens = null, cause = 'manual sell' } = {}) {
+  async executePositionSellNow(positionId, { sellPct = 100, exactTokens = null, cause = 'manual sell', traderExitPriceUsd = null } = {}) {
     const pos = this.positions.find((p) => p.id === positionId);
     if (!pos || pos.remainingTokens <= 0) {
       return { ok: false, error: 'Position not found or already closed.' };
@@ -1030,6 +1046,8 @@ export class CopyTradingEngine {
     pos.soldTokens = Number(((pos.soldTokens || 0) + tokensSold).toFixed(6));
     if (pos.investedSol != null && CHAINS.solana?.nativePriceUsd > 0) pos.soldSol = Number(((pos.soldSol || 0) + netProceedsUsd / CHAINS.solana.nativePriceUsd).toFixed(6));
     pos.lastSellAt = Date.now();
+    // scorecard: our exit vs the trader's own sell price (negative = we sold lower)
+    if (traderExitPriceUsd > 0 && execResult.fillPriceUsd > 0) pos.exitSlipPct = Number(((execResult.fillPriceUsd / traderExitPriceUsd - 1) * 100).toFixed(2));
 
     let positionClosed = false;
     if (fraction >= 0.9999 || pos.remainingTokens <= 0.000001) {
@@ -1093,6 +1111,16 @@ export class CopyTradingEngine {
       pid: pos.id,
       closes: positionClosed, // this sell closed the position (one trade)
       posPnl: positionClosed ? Number(Number(pos.realizedPnlUsd || 0).toFixed(2)) : null, // whole trade's PnL
+      fid: pos.followId || null,
+      // scorecard (closing sell only): hold time, entry / exit slip vs the trader, detection delay
+      ...(positionClosed
+        ? {
+            held: Math.max(0, Math.round((pos.closedAt - pos.openedAt) / 1000)),
+            slipIn: Number.isFinite(pos.entrySlipPct) ? pos.entrySlipPct : null,
+            slipOut: Number.isFinite(pos.exitSlipPct) ? pos.exitSlipPct : null,
+            lag: Number.isFinite(pos.detectLagSec) ? pos.detectLagSec : null,
+          }
+        : {}),
     });
     if (this.realizedLog.length > 20000) this.realizedLog.splice(0, this.realizedLog.length - 20000);
 
@@ -1100,6 +1128,7 @@ export class CopyTradingEngine {
     // so the closing trade's own loss counts toward the 24h limit.
     if (positionClosed) {
       this.evaluateRiskLimitsOnClose(pos, pnlUsd);
+      this.evaluateTraderScore(pos.followId, Boolean(pos.isPaper));
     }
 
     this.alerts.unshift({
@@ -1567,6 +1596,97 @@ export class CopyTradingEngine {
     return this.getStateSnapshot();
   }
 
+  scorecardSettings() {
+    if (!this.settings.scorecard) this.settings.scorecard = createDefaultScorecardSettings();
+    return { ...createDefaultScorecardSettings(), ...this.settings.scorecard };
+  }
+
+  /**
+   * Trader scorecard from the permanent PnL log: real win rate, average hold time and how far the
+   * copies slip behind the trader (entry, exit, detection delay). `since` = only trades after
+   * that time (set when a trader paused for being too fast is resumed).
+   */
+  traderScorecard(followId, { paper = Boolean(this.settings.paperTrading), since = 0 } = {}) {
+    const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+    const rows = (this.realizedLog || []).filter((r) => r.fid === followId && r.closes && Boolean(r.paper) === Boolean(paper) && r.t >= since);
+    const pnls = rows.map((r) => (Number.isFinite(r.posPnl) ? r.posPnl : r.pnl));
+    const wins = pnls.filter((p) => p > 0).length;
+    const losses = pnls.filter((p) => p < 0).length;
+    const held = rows.map((r) => r.held).filter(Number.isFinite);
+    const slipIn = rows.map((r) => r.slipIn).filter(Number.isFinite);
+    const slipOut = rows.map((r) => r.slipOut).filter(Number.isFinite);
+    const lag = rows.map((r) => r.lag).filter(Number.isFinite);
+    const aIn = avg(slipIn);
+    const aOut = avg(slipOut);
+    const r2 = (v) => (v === null ? null : Number(v.toFixed(2)));
+    return {
+      followId,
+      paper: Boolean(paper),
+      trades: rows.length,
+      wins,
+      losses,
+      winRatePct: wins + losses > 0 ? Number(((wins / (wins + losses)) * 100).toFixed(1)) : null,
+      pnlUsd: Number(pnls.reduce((a, b) => a + b, 0).toFixed(2)),
+      avgHoldSec: held.length ? Math.round(avg(held)) : null,
+      avgEntrySlipPct: r2(aIn), // + = we bought higher than the trader
+      avgExitSlipPct: r2(aOut), // − = we sold lower than the trader (Mirror sells only)
+      roundTripSlipPct: aIn === null && aOut === null ? null : r2((aIn || 0) - (aOut || 0)),
+      avgLagSec: lag.length ? Number(avg(lag).toFixed(1)) : null,
+      measuredSlip: slipIn.length,
+      measuredExits: slipOut.length,
+    };
+  }
+
+  /**
+   * Older PnL-log rows have no trader / scorecard fields: fill them in from the closed positions
+   * and buy receipts still on record (last 2 days). Safe to run more than once.
+   */
+  backfillScorecardLog() {
+    let filled = 0;
+    const byId = new Map(this.positions.map((p) => [p.id, p]));
+    for (const r of this.realizedLog || []) {
+      if (r.fid || !r.pid) continue;
+      const p = byId.get(r.pid);
+      if (!p?.followId) continue;
+      r.fid = p.followId;
+      if (r.closes && r.held === undefined) {
+        const buy = this.history.find((h) => h.side === 'buy' && h.status === 'filled' && h.tokenAddress === p.tokenAddress && h.followId === p.followId && Math.abs((h.timestamp || 0) - (p.openedAt || 0)) < 120_000);
+        const trader = Number(p.traderEntryPriceUsd || buy?.traderPriceUsd) || 0;
+        r.held = p.closedAt && p.openedAt ? Math.max(0, Math.round((p.closedAt - p.openedAt) / 1000)) : null;
+        r.slipIn = Number.isFinite(p.entrySlipPct) ? p.entrySlipPct : trader > 0 && p.entryPriceUsd > 0 ? Number(((p.entryPriceUsd / trader - 1) * 100).toFixed(2)) : null;
+        r.slipOut = Number.isFinite(p.exitSlipPct) ? p.exitSlipPct : null;
+        r.lag = Number.isFinite(p.detectLagSec) ? p.detectLagSec : null;
+      }
+      filled += 1;
+    }
+    return filled;
+  }
+
+  /** Pause a trader the bot can't keep up with (after enough closed copies). */
+  evaluateTraderScore(followId, paper) {
+    const cfg = this.scorecardSettings();
+    const follow = this.follows.find((f) => f.id === followId);
+    if (!cfg.autoPause || !follow || follow.status !== 'copying') return null;
+    const sc = this.traderScorecard(followId, { paper, since: Number(follow.scoreSince) || 0 });
+    if (sc.trades < cfg.minTrades) return null;
+    const why = [];
+    if (sc.roundTripSlipPct !== null && sc.roundTripSlipPct > cfg.maxSlipPct) why.push(`copies lose ${sc.roundTripSlipPct.toFixed(1)}% to the trader on average (limit ${cfg.maxSlipPct}%)`);
+    if (sc.avgLagSec !== null && sc.avgLagSec > cfg.maxLagSec) why.push(`trades are seen ${sc.avgLagSec.toFixed(1)} s late on average (limit ${cfg.maxLagSec} s)`);
+    if (!why.length) return null;
+    follow.status = 'paused';
+    follow.pauseReason = 'slow';
+    follow.pauseDetail = why.join('; ');
+    this.alerts.unshift({
+      id: `alt-${randomUUID().slice(0, 8)}`,
+      level: 'danger',
+      title: `@${follow.handle} paused — the bot can't keep up`,
+      message: `Over the last ${sc.trades} copies: ${follow.pauseDetail}. Open positions keep being managed; resume the trader to try again.`,
+      timestamp: Date.now(),
+    });
+    this.emit('follows_updated', {});
+    return follow.pauseDetail;
+  }
+
   /**
    * PnL totals for any period, from the same log as the calendar, so every card agrees.
    * from/to: ms timestamps (to 0 = now). Trades / wins / losses count whole trades (the sell that
@@ -1851,6 +1971,7 @@ export class CopyTradingEngine {
       activeWalletId: this.getActiveWallet()?.id,
       settings: this.settings,
       follows: this.follows,
+      traderScores: Object.fromEntries(this.follows.map((f) => [f.id, { ...this.traderScorecard(f.id), sinceResume: f.scoreSince ? this.traderScorecard(f.id, { since: f.scoreSince }) : null }])),
       positions: enrichedPositions,
       closedPositions,
       positionsSummary: {

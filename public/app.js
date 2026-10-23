@@ -1080,7 +1080,7 @@ function renderKpiStrip() {
     const sign = totalPeriodPnl >= 0 ? '+' : '';
 
     if (pnlEl) {
-      pnlEl.innerHTML = `${pnlAmount(totalPeriodPnl)}${periodCost > 0 ? ` <span class="kpi-pct">${signedPct(pct)}</span>` : ''}`;
+      pnlEl.innerHTML = `${pnlAmount(totalPeriodPnl)}${periodCost > 0 ? ` <span class="kpi-pct">${trendCircle(pct)}${signedPct(pct)}</span>` : ''}`;
       pnlEl.className = `kpi-value ${totalPeriodPnl >= 0 ? 'pos-up' : 'pos-down'}`;
     }
     if (pnlSubEl) {
@@ -1093,7 +1093,7 @@ function renderKpiStrip() {
     if (pnlLabelEl) pnlLabelEl.textContent = 'Unrealized PnL';
     if (pnlEl) {
       const sign = ps.unrealizedPnlUsd >= 0 ? '+' : '';
-      pnlEl.innerHTML = `${pnlAmount(ps.unrealizedPnlUsd)} <span class="kpi-pct">${signedPct(ps.unrealizedPnlPct)}</span>`;
+      pnlEl.innerHTML = `${pnlAmount(ps.unrealizedPnlUsd)} <span class="kpi-pct">${trendCircle(ps.unrealizedPnlPct)}${signedPct(ps.unrealizedPnlPct)}</span>`;
       pnlEl.className = `kpi-value ${ps.unrealizedPnlUsd >= 0 ? 'pos-up' : 'pos-down'}`;
     }
     if (pnlSubEl) {
@@ -1327,6 +1327,56 @@ function renderPositionsList() {
   restoreInputs(container, state);
 }
 
+function fmtHold(sec) {
+  if (!Number.isFinite(sec)) return '—';
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ${String(sec % 60).padStart(2, '0')}s`;
+  return `${Math.floor(sec / 3600)}h ${Math.floor((sec % 3600) / 60)}m`;
+}
+
+/** Scorecard strip on a trader card: real results of the copies and how far they slip behind. */
+function traderScoreHtml(f) {
+  const all = engineState.traderScores?.[f.id];
+  if (!all) return '';
+  const cfg = { autoPause: true, minTrades: 10, maxSlipPct: 20, maxLagSec: 10, ...(engineState.settings.scorecard || {}) };
+  const sc = all.sinceResume && f.scoreSince ? all.sinceResume : all;
+  const pct = (v, signed = true) => (v === null || v === undefined ? '—' : `${signed && v > 0 ? '+' : ''}${Number(v).toFixed(1)}%`);
+  const slipBad = sc.roundTripSlipPct !== null && sc.roundTripSlipPct > cfg.maxSlipPct;
+  const lagBad = sc.avgLagSec !== null && sc.avgLagSec > cfg.maxLagSec;
+  const pnlCls = sc.pnlUsd > 0 ? 'pos-up' : sc.pnlUsd < 0 ? 'pos-down' : '';
+  const judged = sc.trades >= cfg.minTrades;
+  const verdict = f.pauseReason === 'slow'
+    ? `<span class="score-verdict is-bad">Paused: ${esc(f.pauseDetail || "the bot can't keep up")}</span>`
+    : !sc.trades
+      ? '<span class="score-verdict">No closed copies yet</span>'
+      : !judged
+        ? `<span class="score-verdict">${sc.trades}/${cfg.minTrades} copies before ${cfg.autoPause ? 'auto-pause can judge' : 'the score is reliable'}</span>`
+        : slipBad || lagBad
+          ? `<span class="score-verdict is-bad">Falling behind this trader${cfg.autoPause ? '' : ' (auto-pause is off)'}</span>`
+          : '<span class="score-verdict is-good">Keeping up</span>';
+  return `
+          <div class="trader-score">
+            <div class="score-head"><span>Copy scorecard${all.sinceResume && f.scoreSince ? ' · since resume' : ''} · ${engineState.settings.paperTrading ? 'paper' : 'real'}</span>${verdict}</div>
+            <div class="score-grid">
+              <div class="score-item"><span>Win rate</span><strong class="mono">${sc.winRatePct === null ? '—' : `${sc.winRatePct.toFixed(0)}%`}</strong><em>${sc.wins}W · ${sc.losses}L</em></div>
+              <div class="score-item"><span>Copy PnL</span><strong class="mono ${pnlCls}">${sc.trades ? `${sc.pnlUsd >= 0 ? '+' : '−'}$${Math.abs(sc.pnlUsd).toFixed(2)}` : '—'}</strong><em>${sc.trades} trades</em></div>
+              <div class="score-item"><span>Avg hold</span><strong class="mono">${fmtHold(sc.avgHoldSec)}</strong><em>per trade</em></div>
+              <div class="score-item" title="How much higher our copies bought than the trader did"><span>Entry slip</span><strong class="mono">${pct(sc.avgEntrySlipPct)}</strong><em>vs trader buy</em></div>
+              <div class="score-item" title="Mirror sells: our sell price vs the trader's (negative = we sold lower)"><span>Exit slip</span><strong class="mono">${pct(sc.avgExitSlipPct)}</strong><em>${sc.measuredExits ? `${sc.measuredExits} mirror sells` : 'no mirror sells'}</em></div>
+              <div class="score-item ${slipBad ? 'is-bad' : ''}" title="Entry slip minus exit slip: what copying this trader costs per trade"><span>Total slip</span><strong class="mono">${pct(sc.roundTripSlipPct)}</strong><em>limit ${cfg.maxSlipPct}%</em></div>
+              <div class="score-item ${lagBad ? 'is-bad' : ''}" title="Seconds between the trader's trade landing and our copy"><span>Detect delay</span><strong class="mono">${sc.avgLagSec === null ? '—' : `${sc.avgLagSec.toFixed(1)}s`}</strong><em>limit ${cfg.maxLagSec}s</em></div>
+            </div>
+          </div>`;
+}
+
+/** Small green circle with an up arrow (gain) or red circle with a down arrow (loss). */
+function trendCircle(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n === 0) return '';
+  const up = n > 0;
+  return `<span class="trend-circle ${up ? 'is-up' : 'is-down'}" aria-label="${up ? 'up' : 'down'}"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${up ? '<path d="M12 19V5M5 12l7-7 7 7"/>' : '<path d="M12 5v14M19 12l-7 7-7-7"/>'}</svg></span>`;
+}
+
 function renderFollowsList() {
   const container = document.getElementById('follows-list');
   if (!container) return;
@@ -1358,6 +1408,7 @@ function renderFollowsList() {
       const openCount = engineState.positions.filter((p) => p.followId === f.id && p.remainingTokens > 0).length;
       const histCount = engineState.history.filter((h) => h.followId === f.id || traderWalletOf(h) === f.traderWallet).length;
       const sigCount = (liveWatch?.signals || []).filter((x) => x.wallet === f.traderWallet && !x.backfill).length;
+      const slow = f.pauseReason === 'slow';
 
       return `
         <div class="follow-card ${isCopying ? '' : 'is-paused'}" data-follow="${f.id}">
@@ -1367,7 +1418,7 @@ function renderFollowsList() {
               <div>
                 <div class="follow-name-row">
                   <strong class="follow-name">${esc(f.name)}</strong>
-                  <span class="status-pill ${isCopying ? 'status-copying' : 'status-paused'}">${isCopying ? 'Copying' : 'Paused'}</span>
+                  <span class="status-pill ${isCopying ? 'status-copying' : 'status-paused'}">${isCopying ? 'Copying' : slow ? "Paused · can't keep up" : 'Paused'}</span>
                   ${chainBadgeHtml(f.chainId)}
                 </div>
                 <div class="follow-sub mono"><a href="https://solscan.io/account/${encodeURIComponent(f.traderWallet)}" target="_blank" rel="noopener" title="${f.traderWallet}">${f.traderWallet.slice(0, 6)}…${f.traderWallet.slice(-6)}</a> · copies real swaps</div>
@@ -1387,6 +1438,7 @@ function renderFollowsList() {
             <div class="meta-item"><span>Limits</span><strong class="mono">${[f.minTradeUsd != null ? `Min $${f.minTradeUsd}` : '', f.maxOpenPositions != null ? `${f.maxOpenPositions} open max` : '', f.maxAtRiskUsd != null ? `$${Number(f.maxAtRiskUsd).toLocaleString()} at risk` : ''].filter(Boolean).join(' · ') || 'None set'}</strong></div>
             <div class="meta-item"><span>Losing streak</span><strong class="mono ${(f.consecutiveLosses || 0) > 0 ? 'pos-down' : ''}">${f.consecutiveLosses || 0}</strong></div>
           </div>
+          ${traderScoreHtml(f)}
           ${f.mode === 'auto-exit' && activeExitCount === 0 ? `<div class="follow-warn">
             <span><strong>No exit rules are on.</strong> In Auto-Exit mode nothing sells automatically, and the trader's sells aren't copied either.</span>
             <button type="button" class="btn btn-sm btn-primary" onclick="useRecommendedExits('${f.id}')">Turn on recommended exits</button>
@@ -1926,6 +1978,14 @@ function populateSettingsInputs() {
   document.getElementById('set-trading-asset').value = s.tradingAsset.solana || 'stable';
   const topUpsEl = document.getElementById('set-copy-topups');
   if (topUpsEl) topUpsEl.value = s.copyTopUps ? 'true' : 'false';
+  const scs = { autoPause: true, minTrades: 10, maxSlipPct: 20, maxLagSec: 10, ...(s.scorecard || {}) };
+  const scEl = (id) => document.getElementById(id);
+  if (scEl('set-sc-autopause')) {
+    scEl('set-sc-autopause').value = scs.autoPause ? 'true' : 'false';
+    scEl('set-sc-min-trades').value = scs.minTrades;
+    scEl('set-sc-max-slip').value = scs.maxSlipPct;
+    scEl('set-sc-max-lag').value = scs.maxLagSec;
+  }
 
   document.getElementById('set-min-mc').value = s.filters.minMarketCapUsd ?? '';
   document.getElementById('set-max-mc').value = s.filters.maxMarketCapUsd ?? '';
@@ -1972,6 +2032,16 @@ window.saveExecutionSettings = async function saveExecutionSettings() {
       retryBuys: document.getElementById('set-retry-buys').value === 'true',
       tradingAsset: { solana: assetMode, bsc: assetMode, robinhood: assetMode, arc: 'stable' },
       copyTopUps: document.getElementById('set-copy-topups')?.value === 'true',
+      ...(document.getElementById('set-sc-autopause')
+        ? {
+            scorecard: {
+              autoPause: document.getElementById('set-sc-autopause').value === 'true',
+              minTrades: Number(document.getElementById('set-sc-min-trades').value || 10),
+              maxSlipPct: Number(document.getElementById('set-sc-max-slip').value || 20),
+              maxLagSec: Number(document.getElementById('set-sc-max-lag').value || 10),
+            },
+          }
+        : {}),
     }),
   });
   const data = await res.json();
@@ -3959,9 +4029,10 @@ function renderBalancesEverywhereLite() {
   const pill = document.getElementById('header-sol-balance');
   if (pill) pill.textContent = b ? `${b.sol.toFixed(b.sol >= 100 ? 1 : 3)} SOL` : walletChainAddress() ? '… SOL' : '0.00 SOL';
   const usdcEl = document.getElementById('hwd-usdc-bal');
-  if (usdcEl) usdcEl.textContent = b ? b.usdc.toFixed(2) : '0.00';
+  // the big number is SOL; the line under it shows the USD value (+ USDC when the wallet holds any)
+  if (usdcEl) usdcEl.textContent = b ? b.sol.toFixed(b.sol >= 100 ? 2 : 3) : '0.00';
   const solEl = document.getElementById('hwd-sol-bal');
-  if (solEl) solEl.textContent = b ? `≈ ${formatUsd(b.usd)} · ${b.sol.toFixed(3)} SOL` : walletChainAddress() ? 'Reading balance…' : 'No address linked';
+  if (solEl) solEl.textContent = b ? `≈ ${formatUsd(b.usd)}${b.usdc > 0 ? ` · ${b.usdc.toFixed(2)} USDC` : ''}` : walletChainAddress() ? 'Reading balance…' : 'No address linked';
   const pb = document.getElementById('paper-bal');
   if (pb) pb.textContent = formatUsd(Number(activeWalletObj()?.paperBalanceUsd ?? 10000));
   if (walletChainAddress() && (!chainBalance || chainBalance.address !== walletChainAddress())) refreshChainBalance();
@@ -4044,7 +4115,7 @@ window.renderDepositPane = function renderDepositPane() {
   if (test) test.hidden = !paper;
 
   if (addr) {
-    label.textContent = own ? 'Your SOL deposit address' : 'Your Phantom wallet · SOL deposit address';
+    label.textContent = own ? 'Your SOL deposit address' : `Your ${linkedWallet()?.name || 'Phantom'} wallet · SOL deposit address`;
     text.textContent = addr;
     hidden.value = addr;
     try {
@@ -4060,7 +4131,7 @@ window.renderDepositPane = function renderDepositPane() {
     if (setBox) setBox.hidden = true;
   } else {
     label.textContent = 'No deposit address yet';
-    text.textContent = 'Connect Phantom or paste a Solana address you own. Never send funds until a real address and QR appear here.';
+    text.textContent = 'Connect Phantom or MetaMask, or paste a Solana address you own. Never send funds until a real address and QR appear here.';
     hidden.value = '';
     qr.innerHTML = `<div class="exch-qr-empty"><svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 17h3v3"/></svg><span>No address</span></div>`;
     card.classList.add('is-paper');
@@ -4125,15 +4196,23 @@ function getPhantomProvider() {
   return p && p.isPhantom ? p : null;
 }
 
+/** The linked browser wallet (Phantom or MetaMask), or null. Only one is linked at a time. */
+function linkedWallet() {
+  const ew = engineState?.settings?.externalWallets || {};
+  if (ew.phantom?.address) return { provider: 'phantom', name: 'Phantom', address: ew.phantom.address };
+  if (ew.metamask?.address) return { provider: 'metamask', name: 'MetaMask', address: ew.metamask.address };
+  return null;
+}
+/** Address of the linked wallet (Phantom or MetaMask): deposit address, balance, Onramper. */
 function phantomAddress() {
-  return engineState?.settings?.externalWallets?.phantom?.address || null;
+  return linkedWallet()?.address || null;
 }
 
-async function saveExternalWallet(action, address) {
+async function saveExternalWallet(action, address, provider = 'phantom') {
   const res = await fetch('/api/wallets', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action, provider: 'phantom', address }),
+    body: JSON.stringify({ action, provider, address }),
   });
   const data = await res.json();
   if (data.state) {
@@ -4170,7 +4249,7 @@ function bindPhantomEvents(provider) {
 }
 
 window.phantomButtonClick = async function phantomButtonClick() {
-  if (phantomAddress()) return disconnectPhantom();
+  if (linkedWallet()?.provider === 'phantom') return disconnectPhantom();
   return connectPhantom();
 };
 
@@ -4180,7 +4259,7 @@ window.connectPhantom = async function connectPhantom() {
   const provider = await waitForPhantom();
   if (btn0) btn0.disabled = false;
   if (!provider) {
-    showToast('Phantom extension not found in this browser. Open this page in Chrome with the Phantom extension enabled (or install it from phantom.com), then try again.', 'warn');
+    phantomNotFound();
     return;
   }
   const btn = document.getElementById('btn-phantom');
@@ -4209,7 +4288,7 @@ window.disconnectPhantom = async function disconnectPhantom() {
     // extension may already be disconnected
   }
   phantomBalanceSol = null;
-  await saveExternalWallet('unlink-external');
+  await saveExternalWallet('unlink-external', null, 'phantom');
   showToast('Phantom unlinked', 'good');
 };
 
@@ -4224,19 +4303,30 @@ window.watchPhantomInSignals = async function watchPhantomInSignals() {
 };
 
 function renderPhantom() {
-  const addr = phantomAddress();
+  const lw = linkedWallet();
+  const addr = lw?.address || null;
   const label = document.getElementById('btn-phantom-label');
   const btn = document.getElementById('btn-phantom');
   const box = document.getElementById('phantom-linked');
-  if (label) label.textContent = addr ? 'Disconnect Phantom' : 'Connect Phantom';
-  if (btn) btn.classList.toggle('is-linked', Boolean(addr));
+  const isPh = lw?.provider === 'phantom';
+  const isMm = lw?.provider === 'metamask';
+  if (label) label.textContent = isPh ? 'Disconnect Phantom' : 'Connect Phantom';
+  if (btn) btn.classList.toggle('is-linked', isPh);
+  const mmLabel = document.getElementById('btn-metamask-label');
+  const mmBtn = document.getElementById('btn-metamask');
+  if (mmLabel) mmLabel.textContent = isMm ? 'Disconnect MetaMask' : 'Connect MetaMask';
+  if (mmBtn) mmBtn.classList.toggle('is-linked', isMm);
+  const sendBtn = document.getElementById('btn-phantom-send');
+  if (sendBtn) sendBtn.textContent = `Send from ${isMm ? 'MetaMask' : 'Phantom'}`;
+  const fundTitle = document.querySelector('#phantom-fund .phantom-fund-head strong');
+  if (fundTitle) fundTitle.textContent = `Fund the bot wallet from ${isMm ? 'MetaMask' : 'Phantom'}`;
   if (box) {
     box.hidden = !addr;
     if (addr) {
       box.innerHTML = `
         <span class="ws-dot"></span>
         <div class="phantom-linked-main">
-          <strong>Phantom linked</strong>
+          <strong>${esc(lw.name)} linked</strong>
           <span class="mono" title="${esc(addr)}">${esc(shortAddr(addr, 6, 6))}${phantomBalanceSol !== null ? ` · ${Number(phantomBalanceSol).toFixed(4)} SOL` : ''}</span>
         </div>
         <button class="btn btn-sm" onclick="watchPhantomInSignals()" title="Show this wallet's real trades in Live Signals">Watch</button>`;
@@ -4246,7 +4336,7 @@ function renderPhantom() {
   const row = document.getElementById('hwd-phantom');
   if (row) {
     row.innerHTML = addr
-      ? `<span class="hwd-bal-lbl">Phantom</span><span class="hwd-bal-num mono" title="${esc(addr)}">${esc(shortAddr(addr))}${phantomBalanceSol !== null ? ` · ${Number(phantomBalanceSol).toFixed(3)} SOL` : ''}</span>`
+      ? `<span class="hwd-bal-lbl">${esc(lw.name)}</span><span class="hwd-bal-num mono" title="${esc(addr)}">${esc(shortAddr(addr))}${phantomBalanceSol !== null ? ` · ${Number(phantomBalanceSol).toFixed(3)} SOL` : ''}</span>`
       : `<span class="hwd-bal-lbl">Phantom</span><button class="link-btn" onclick="toggleHeaderWalletDropdown(); openDepositModal('deposit')">Connect</button>`;
   }
 }
@@ -4258,7 +4348,7 @@ window.addEventListener('DOMContentLoaded', () => {
     const provider = await waitForPhantom(4000);
     if (!provider) return;
     bindPhantomEvents(provider);
-    if (phantomAddress()) {
+    if (linkedWallet()?.provider === 'phantom') {
       try {
         await provider.connect({ onlyIfTrusted: true });
       } catch {
@@ -4821,3 +4911,358 @@ setInterval(() => {
   const card = document.getElementById('real-trading-card');
   if (card && card.offsetParent !== null) window.refreshRealPanel?.();
 }, 20_000);
+
+
+// ---------------------------------------------------------------------------
+// Phantom: no extension (open in the Phantom app on phones / install on desktop),
+// and funding the real-trading bot wallet with a SOL transfer Phantom signs and sends.
+// The site never sees a private key: Phantom shows the exact transfer for approval.
+// ---------------------------------------------------------------------------
+function isMobileDevice() {
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+}
+
+function phantomNotFound() {
+  if (isMobileDevice()) {
+    // Phones have no extensions: reopen this page inside the Phantom app's browser
+    showToast('Opening this page in the Phantom app…', 'good');
+    window.location.href = `https://phantom.app/ul/browse/${encodeURIComponent(location.href)}?ref=${encodeURIComponent(location.origin)}`;
+    return;
+  }
+  showToast('Phantom extension not found in this browser. Install it from phantom.com (opened in a new tab), then reload this page.', 'warn');
+  window.open('https://phantom.com/download', '_blank', 'noopener');
+}
+
+const B58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function b58encode(bytes) {
+  let zeros = 0;
+  while (zeros < bytes.length && bytes[zeros] === 0) zeros++;
+  let n = 0n;
+  for (const b of bytes) n = n * 256n + BigInt(b);
+  let out = '';
+  while (n > 0n) {
+    out = B58_ALPHABET[Number(n % 58n)] + out;
+    n /= 58n;
+  }
+  return '1'.repeat(zeros) + out;
+}
+function b58decode(str) {
+  let n = 0n;
+  for (const c of str) {
+    const i = B58_ALPHABET.indexOf(c);
+    if (i < 0) throw new Error('bad base58');
+    n = n * 58n + BigInt(i);
+  }
+  const bytes = [];
+  while (n > 0n) {
+    bytes.unshift(Number(n % 256n));
+    n /= 256n;
+  }
+  for (const c of str) {
+    if (c !== '1') break;
+    bytes.unshift(0);
+  }
+  return Uint8Array.from(bytes);
+}
+function pubkeyBytes(addr) {
+  const b = b58decode(addr);
+  if (b.length !== 32) throw new Error('not a Solana address');
+  return b;
+}
+
+/** Legacy transaction message: one System Program transfer of `lamports` from → to. */
+function buildSolTransferMessage(from, to, lamports, blockhash) {
+  const SYSTEM = new Uint8Array(32); // 11111111111111111111111111111111
+  const data = new Uint8Array(12);
+  const dv = new DataView(data.buffer);
+  dv.setUint32(0, 2, true); // Transfer
+  dv.setBigUint64(4, BigInt(lamports), true);
+  const parts = [
+    Uint8Array.from([1, 0, 1]), // 1 signer (payer), 0 read-only signers, 1 read-only account (System Program)
+    Uint8Array.from([3]), pubkeyBytes(from), pubkeyBytes(to), SYSTEM,
+    pubkeyBytes(blockhash),
+    Uint8Array.from([1, 2, 2, 0, 1, 12]), // 1 instruction: program #2, accounts [0, 1], 12 bytes of data
+    data,
+  ];
+  const len = parts.reduce((a, p) => a + p.length, 0);
+  const msg = new Uint8Array(len);
+  let o = 0;
+  for (const p of parts) {
+    msg.set(p, o);
+    o += p.length;
+  }
+  return msg;
+}
+
+let botWalletInfo = null; // { address, at }
+async function loadBotWallet(force = false) {
+  if (!force && botWalletInfo && Date.now() - botWalletInfo.at < 30_000) return botWalletInfo.address;
+  try {
+    const r = await fetch('/api/real/status');
+    const d = await r.json();
+    botWalletInfo = { address: d.ok && d.configured && isRealSolanaAddress(d.address) ? d.address : null, at: Date.now() };
+  } catch {
+    botWalletInfo = { address: null, at: Date.now() };
+  }
+  return botWalletInfo.address;
+}
+
+function fundMsg(text, kind = '') {
+  const el = document.getElementById('phantom-fund-msg');
+  if (!el) return;
+  el.className = `phantom-fund-msg${kind ? ` is-${kind}` : ''}`;
+  el.innerHTML = text;
+}
+
+async function renderPhantomFund() {
+  const box = document.getElementById('phantom-fund');
+  if (!box) return;
+  const bot = await loadBotWallet();
+  box.hidden = !bot;
+  if (!bot) return;
+  const lbl = document.getElementById('phantom-fund-bot');
+  lbl.textContent = `Bot ${shortAddr(bot, 4, 4)}`;
+  lbl.title = bot;
+}
+
+{
+  const baseRenderDeposit = window.renderDepositPane;
+  window.renderDepositPane = function renderDepositPaneWithFund() {
+    baseRenderDeposit();
+    renderPhantomFund();
+  };
+}
+
+window.phantomFundMax = async function phantomFundMax() {
+  const addr = phantomAddress();
+  if (!addr) return showToast('Connect Phantom first.', 'warn');
+  await refreshPhantomBalance();
+  if (phantomBalanceSol === null) return showToast('Could not read your Phantom balance.', 'danger');
+  // keep a little SOL in Phantom for the network fee
+  const max = Math.max(0, Math.floor((phantomBalanceSol - 0.001) * 1e4) / 1e4);
+  document.getElementById('phantom-fund-amt').value = max > 0 ? String(max) : '';
+};
+
+let phantomSendBusy = false;
+window.sendSolFromPhantom = async function sendSolFromPhantom() {
+  if (phantomSendBusy) return;
+  if (linkedWallet()?.provider === 'metamask') return sendSolFromMetaMask();
+  const amt = Number(document.getElementById('phantom-fund-amt')?.value);
+  if (!(amt > 0)) return fundMsg('Enter how much SOL to send.', 'bad');
+  const btn = document.getElementById('btn-phantom-send');
+  phantomSendBusy = true;
+  if (btn) btn.disabled = true;
+  try {
+    const bot = await loadBotWallet(true);
+    if (!bot) throw new Error('The bot wallet is not set up (ODEX_TRADER_KEY in .env).');
+    const provider = await waitForPhantom();
+    if (!provider) {
+      phantomNotFound();
+      return;
+    }
+    fundMsg('Waiting for Phantom…');
+    const resp = await provider.connect();
+    const from = (resp?.publicKey || provider.publicKey)?.toString();
+    if (!isRealSolanaAddress(from)) throw new Error('Phantom did not return a Solana address');
+    if (from === bot) throw new Error('This Phantom account is the bot wallet itself.');
+    if (phantomAddress() !== from) {
+      await saveExternalWallet('link-external', from);
+      bindPhantomEvents(provider);
+    }
+    // enough SOL? (amount + ~0.000005 SOL network fee)
+    const balRes = await fetch(`/api/external-wallet/balance?address=${encodeURIComponent(from)}`).then((r) => r.json()).catch(() => null);
+    if (balRes?.ok && balRes.sol < amt + 0.00001) throw new Error(`Phantom has ${Number(balRes.sol).toFixed(4)} SOL — not enough to send ${amt} SOL plus the network fee.`);
+    const bh = await fetch('/api/solana/blockhash').then((r) => r.json());
+    if (!bh?.ok) throw new Error(bh?.error || 'Could not reach the Solana network.');
+    const lamports = Math.round(amt * 1e9);
+    const message = buildSolTransferMessage(from, bot, lamports, bh.blockhash);
+    fundMsg(`Approve sending <strong>${amt} SOL</strong> to the bot wallet in Phantom…`);
+    const out = await provider.request({ method: 'signAndSendTransaction', params: { message: b58encode(message) } });
+    const sig = out?.signature || out?.publicKey || null;
+    if (!sig) throw new Error('Phantom did not return a transaction id.');
+    const link = `<a href="https://solscan.io/tx/${encodeURIComponent(sig)}" target="_blank" rel="noopener">Solscan</a>`;
+    fundMsg(`Sent — confirming on-chain… (${link})`);
+    let status = 'pending';
+    for (let i = 0; i < 30 && status === 'pending'; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const st = await fetch(`/api/solana/tx-status?sig=${encodeURIComponent(sig)}`).then((r) => r.json()).catch(() => null);
+      if (st?.ok) status = st.status;
+    }
+    if (status === 'confirmed') {
+      fundMsg(`${amt} SOL arrived in the bot wallet. (${link})`, 'good');
+      showToast(`Bot wallet funded · ${amt} SOL`, 'good');
+      document.getElementById('phantom-fund-amt').value = '';
+    } else if (status === 'failed') {
+      fundMsg(`The transfer failed on-chain — no SOL was moved. (${link})`, 'bad');
+    } else {
+      fundMsg(`Still confirming — check it on ${link}.`);
+    }
+    refreshPhantomBalance();
+    fetch('/api/real/status').catch(() => {}); // refreshes the bot wallet balance on the server
+  } catch (err) {
+    const msg = err?.code === 4001 ? 'You declined the transfer in Phantom — nothing was sent.' : err?.message || 'Phantom transfer failed.';
+    fundMsg(esc(msg), 'bad');
+  } finally {
+    phantomSendBusy = false;
+    if (btn) btn.disabled = false;
+  }
+};
+
+
+// ---------------------------------------------------------------------------
+// MetaMask (Solana). MetaMask exposes its Solana account through the Wallet Standard
+// (the shared interface Solana wallets register in the page), not window.solana.
+// Read-only link for deposits/balance; sending SOL to the bot wallet is approved in MetaMask.
+// ---------------------------------------------------------------------------
+const standardWallets = new Set();
+{
+  const register = (...wallets) => {
+    for (const w of wallets) if (w) standardWallets.add(w);
+    return () => wallets.forEach((w) => standardWallets.delete(w));
+  };
+  try {
+    window.addEventListener('wallet-standard:register-wallet', (e) => {
+      try {
+        e.detail({ register });
+      } catch {
+        // a wallet that registers badly is ignored
+      }
+    });
+    window.dispatchEvent(new CustomEvent('wallet-standard:app-ready', { detail: { register } }));
+  } catch {
+    // very old browser
+  }
+}
+
+function findMetaMaskSolana() {
+  for (const w of standardWallets) {
+    if (/metamask/i.test(w?.name || '') && (w.chains || []).some((c) => String(c).startsWith('solana:')) && w.features?.['standard:connect']) return w;
+  }
+  return null;
+}
+async function waitForMetaMask(ms = 2500) {
+  const until = Date.now() + ms;
+  let w = findMetaMaskSolana();
+  while (!w && Date.now() < until) {
+    await new Promise((r) => setTimeout(r, 150));
+    w = findMetaMaskSolana();
+  }
+  return w;
+}
+
+function metamaskNotFound() {
+  if (window.ethereum?.isMetaMask) {
+    showToast("MetaMask is installed, but its Solana account isn't available. Update MetaMask to the latest version (Solana is built in), unlock it, then try again.", 'warn');
+    return;
+  }
+  if (isMobileDevice()) {
+    showToast('Opening this page in the MetaMask app…', 'good');
+    window.location.href = `https://metamask.app.link/dapp/${location.host}${location.pathname}${location.search}`;
+    return;
+  }
+  showToast('MetaMask extension not found in this browser. Install it from metamask.io (opened in a new tab), then reload this page.', 'warn');
+  window.open('https://metamask.io/download/', '_blank', 'noopener');
+}
+
+async function metamaskConnectAccount() {
+  const w = await waitForMetaMask();
+  if (!w) {
+    metamaskNotFound();
+    return null;
+  }
+  const res = await w.features['standard:connect'].connect();
+  const accounts = res?.accounts?.length ? res.accounts : w.accounts || [];
+  const account = accounts.find((a) => isRealSolanaAddress(a?.address)) || null;
+  if (!account) throw new Error('MetaMask did not return a Solana account');
+  return { wallet: w, account };
+}
+
+window.metamaskButtonClick = async function metamaskButtonClick() {
+  if (linkedWallet()?.provider === 'metamask') return disconnectMetaMask();
+  return connectMetaMask();
+};
+
+window.connectMetaMask = async function connectMetaMask() {
+  const btn = document.getElementById('btn-metamask');
+  if (btn) btn.disabled = true;
+  try {
+    const got = await metamaskConnectAccount();
+    if (!got) return;
+    const data = await saveExternalWallet('link-external', got.account.address, 'metamask');
+    if (!data.ok) throw new Error(data.error || 'Could not link MetaMask');
+    showToast(`MetaMask linked · ${shortAddr(got.account.address)}`, 'good');
+    refreshPhantomBalance();
+  } catch (err) {
+    const msg = err?.code === 4001 || /reject|denied|cancel/i.test(err?.message || '') ? 'Connection request was declined in MetaMask' : err?.message || 'MetaMask connection failed';
+    showToast(msg, 'danger');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+};
+
+window.disconnectMetaMask = async function disconnectMetaMask() {
+  try {
+    await findMetaMaskSolana()?.features?.['standard:disconnect']?.disconnect?.();
+  } catch {
+    // already disconnected
+  }
+  phantomBalanceSol = null;
+  await saveExternalWallet('unlink-external', null, 'metamask');
+  showToast('MetaMask unlinked', 'good');
+};
+
+async function sendSolFromMetaMask() {
+  const amt = Number(document.getElementById('phantom-fund-amt')?.value);
+  if (!(amt > 0)) return fundMsg('Enter how much SOL to send.', 'bad');
+  const btn = document.getElementById('btn-phantom-send');
+  phantomSendBusy = true;
+  if (btn) btn.disabled = true;
+  try {
+    const bot = await loadBotWallet(true);
+    if (!bot) throw new Error('The bot wallet is not set up (ODEX_TRADER_KEY in .env).');
+    fundMsg('Waiting for MetaMask…');
+    const got = await metamaskConnectAccount();
+    if (!got) return;
+    const from = got.account.address;
+    if (from === bot) throw new Error('This MetaMask account is the bot wallet itself.');
+    if (phantomAddress() !== from) await saveExternalWallet('link-external', from, 'metamask');
+    const feature = got.wallet.features['solana:signAndSendTransaction'];
+    if (!feature?.signAndSendTransaction) throw new Error('This MetaMask version cannot send Solana transactions — update MetaMask.');
+    const balRes = await fetch(`/api/external-wallet/balance?address=${encodeURIComponent(from)}`).then((r) => r.json()).catch(() => null);
+    if (balRes?.ok && balRes.sol < amt + 0.00001) throw new Error(`MetaMask has ${Number(balRes.sol).toFixed(4)} SOL — not enough to send ${amt} SOL plus the network fee.`);
+    const bh = await fetch('/api/solana/blockhash').then((r) => r.json());
+    if (!bh?.ok) throw new Error(bh?.error || 'Could not reach the Solana network.');
+    const message = buildSolTransferMessage(from, bot, Math.round(amt * 1e9), bh.blockhash);
+    // a full unsigned transaction: 1 empty signature slot + the message
+    const tx = new Uint8Array(1 + 64 + message.length);
+    tx[0] = 1;
+    tx.set(message, 65);
+    fundMsg(`Approve sending <strong>${amt} SOL</strong> to the bot wallet in MetaMask…`);
+    const out = await feature.signAndSendTransaction({ account: got.account, transaction: tx, chain: 'solana:mainnet' });
+    const raw = Array.isArray(out) ? out[0]?.signature : out?.signature;
+    const sig = raw instanceof Uint8Array ? b58encode(raw) : typeof raw === 'string' ? raw : null;
+    if (!sig) throw new Error('MetaMask did not return a transaction id.');
+    const link = `<a href="https://solscan.io/tx/${encodeURIComponent(sig)}" target="_blank" rel="noopener">Solscan</a>`;
+    fundMsg(`Sent — confirming on-chain… (${link})`);
+    let status = 'pending';
+    for (let i = 0; i < 30 && status === 'pending'; i++) {
+      await new Promise((r) => setTimeout(r, 2000));
+      const st = await fetch(`/api/solana/tx-status?sig=${encodeURIComponent(sig)}`).then((r) => r.json()).catch(() => null);
+      if (st?.ok) status = st.status;
+    }
+    if (status === 'confirmed') {
+      fundMsg(`${amt} SOL arrived in the bot wallet. (${link})`, 'good');
+      showToast(`Bot wallet funded · ${amt} SOL`, 'good');
+      document.getElementById('phantom-fund-amt').value = '';
+    } else if (status === 'failed') fundMsg(`The transfer failed on-chain — no SOL was moved. (${link})`, 'bad');
+    else fundMsg(`Still confirming — check it on ${link}.`);
+    refreshPhantomBalance();
+    fetch('/api/real/status').catch(() => {});
+  } catch (err) {
+    const msg = err?.code === 4001 || /reject|denied|cancel/i.test(err?.message || '') ? 'You declined the transfer in MetaMask — nothing was sent.' : err?.message || 'MetaMask transfer failed.';
+    fundMsg(esc(msg), 'bad');
+  } finally {
+    phantomSendBusy = false;
+    if (btn) btn.disabled = false;
+  }
+}

@@ -414,9 +414,11 @@ export class SolanaWalletWatcher {
     stream = true,
     WebSocketImpl = globalThis.WebSocket,
     balanceWsUrl = process.env.SOLANA_BALANCE_WS_URL || 'wss://api.mainnet-beta.solana.com',
+    streamUrl = null, // live push connection; default: the RPC URL as wss
     redactUrl = (x) => x,
   } = {}) {
     this.rpcUrl = rpcUrl;
+    this.fixedStreamUrl = streamUrl || null;
     this.fetch = fetchImpl;
     this.tokenInfo = tokenInfo || new TokenInfoService({ fetchImpl });
     this.onSignal = onSignal;
@@ -443,7 +445,7 @@ export class SolanaWalletWatcher {
     this.streamMaxConcurrent = 4;
     this.streamStats = { swapsSeen: 0, notSwap: 0, failedTx: 0, signals: 0, lagMs: [] };
     this.stream = new WalletStream({
-      url: toWsUrl(rpcUrl),
+      url: streamUrl || toWsUrl(rpcUrl),
       WebSocketImpl,
       redactUrl,
       onLogs: (address, ev) => this.handleStreamLogs(address, ev),
@@ -494,7 +496,7 @@ export class SolanaWalletWatcher {
   setRpcUrl(url) {
     this.rpcUrl = url || DEFAULT_SOLANA_RPC;
     this.status.rpcUrl = this.rpcUrl;
-    this.stream.setUrl(toWsUrl(this.rpcUrl));
+    if (!this.fixedStreamUrl) this.stream.setUrl(toWsUrl(this.rpcUrl)); // a dedicated stream (Helius) stays
     this.emitStatus();
   }
 

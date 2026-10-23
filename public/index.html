@@ -117,7 +117,7 @@
               <span class="sw-head-status hwd-status"><span class="dot"></span>Active</span>
             </div>
             <div class="hwd-bal">
-              <div><strong class="mono" id="hwd-usdc-bal">0.00</strong> <span>USDC</span></div>
+              <div><strong class="mono" id="hwd-usdc-bal">0.00</strong> <span>SOL</span></div>
               <div class="sw-usd mono" id="hwd-sol-bal">≈ $0.00</div>
             </div>
           </div>
@@ -579,6 +579,25 @@
                   <option value="false">One copy per trader position (Default)</option>
                   <option value="true">Copy every top-up as a new position</option>
                 </select>
+              </div>
+              <div class="field">
+                <label>Auto-pause Slow Traders</label>
+                <select id="set-sc-autopause" class="input" title="Pause a trader when the copies keep falling behind them">
+                  <option value="true">ON — pause traders the bot can't keep up with (Default)</option>
+                  <option value="false">OFF — only show the scorecard</option>
+                </select>
+              </div>
+              <div class="field">
+                <label>Judge After (Closed Copies)</label>
+                <input type="number" id="set-sc-min-trades" class="input" min="3" max="1000" step="1" placeholder="10" />
+              </div>
+              <div class="field">
+                <label>Max Total Slip vs Trader (%)</label>
+                <input type="number" id="set-sc-max-slip" class="input" min="1" max="500" step="1" placeholder="20" />
+              </div>
+              <div class="field">
+                <label>Max Detect Delay (Seconds)</label>
+                <input type="number" id="set-sc-max-lag" class="input" min="1" max="600" step="1" placeholder="10" />
               </div>
               <div class="field">
                 <label>Trading Asset Mode</label>
@@ -1134,11 +1153,30 @@
 
         <button class="btn-exch-primary" id="btn-copy-address" onclick="copyDepositAddress()">Copy Address</button>
 
-        <button class="btn-phantom" id="btn-phantom" onclick="phantomButtonClick()">
-          <svg class="phantom-ghost" width="20" height="20" viewBox="0 0 128 128" aria-hidden="true"><path fill="currentColor" d="M64 12C34.2 12 12 35.9 12 64.5v44.1c0 4.6 5.6 6.9 8.8 3.6l6.3-6.4c1.9-1.9 5-1.9 6.9 0l6.6 6.7c1.9 1.9 5 1.9 6.9 0l6.6-6.7c1.9-1.9 5-1.9 6.9 0l6.6 6.7c1.9 1.9 5 1.9 6.9 0l6.6-6.7c1.9-1.9 5-1.9 6.9 0l6.3 6.4c3.2 3.3 8.8 1 8.8-3.6V64.5C116 35.9 93.8 12 64 12z"/><ellipse cx="48" cy="58" rx="7" ry="10" fill="#AB9FF2"/><ellipse cx="80" cy="58" rx="7" ry="10" fill="#AB9FF2"/></svg>
-          <span id="btn-phantom-label">Connect Phantom</span>
-        </button>
+        <div class="wallet-connect-row">
+          <button class="btn-phantom" id="btn-phantom" onclick="phantomButtonClick()">
+            <svg class="phantom-ghost" width="20" height="20" viewBox="0 0 128 128" aria-hidden="true"><path fill="currentColor" d="M64 12C34.2 12 12 35.9 12 64.5v44.1c0 4.6 5.6 6.9 8.8 3.6l6.3-6.4c1.9-1.9 5-1.9 6.9 0l6.6 6.7c1.9 1.9 5 1.9 6.9 0l6.6-6.7c1.9-1.9 5-1.9 6.9 0l6.6 6.7c1.9 1.9 5 1.9 6.9 0l6.6-6.7c1.9-1.9 5-1.9 6.9 0l6.3 6.4c3.2 3.3 8.8 1 8.8-3.6V64.5C116 35.9 93.8 12 64 12z"/><ellipse cx="48" cy="58" rx="7" ry="10" fill="#AB9FF2"/><ellipse cx="80" cy="58" rx="7" ry="10" fill="#AB9FF2"/></svg>
+            <span id="btn-phantom-label">Connect Phantom</span>
+          </button>
+          <button class="btn-phantom btn-metamask" id="btn-metamask" onclick="metamaskButtonClick()">
+            <img class="metamask-icon" src="/icons/metamask.svg" alt="" width="19" height="18" />
+            <span id="btn-metamask-label">Connect MetaMask</span>
+          </button>
+        </div>
         <div class="phantom-linked" id="phantom-linked" hidden></div>
+        <div class="phantom-fund" id="phantom-fund" hidden>
+          <div class="phantom-fund-head">
+            <strong>Fund the bot wallet from Phantom</strong>
+            <span class="mono" id="phantom-fund-bot" title=""></span>
+          </div>
+          <p class="phantom-fund-note">Real trades use the bot wallet. Send SOL to it straight from Phantom — you approve the exact amount in Phantom.</p>
+          <div class="phantom-fund-row">
+            <input type="number" id="phantom-fund-amt" class="input mono" placeholder="Amount in SOL" min="0" step="0.01" inputmode="decimal" />
+            <button type="button" class="btn btn-sm" onclick="phantomFundMax()">Max</button>
+            <button type="button" class="btn-fund-send" id="btn-phantom-send" onclick="sendSolFromPhantom()">Send from Phantom</button>
+          </div>
+          <div class="phantom-fund-msg" id="phantom-fund-msg" role="status"></div>
+        </div>
 
         <div class="exch-test" id="exch-test">
           <span>Paper trading balance · <strong class="mono" id="paper-bal">$10,000.00</strong></span>
