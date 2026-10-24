@@ -4180,6 +4180,41 @@ window.openOnramper = function openOnramper() {
 let phantomBalanceSol = null;
 let phantomListenersBound = false;
 
+/** Clear message for a wallet-extension error (they often only say "Unexpected error"). */
+function walletErrorMessage(err, name) {
+  const code = err?.code ?? err?.error?.code;
+  const raw = String(err?.message || err?.error?.message || err || '');
+  try {
+    console.warn(`[odex] ${name} error`, code, raw, err);
+  } catch {
+    // console unavailable
+  }
+  if (code === 4001 || /reject|denied|declin|cancel/i.test(raw)) return `You declined the request in ${name} — nothing happened.`;
+  if (code === -32002 || /already pending|already processing/i.test(raw)) return `A ${name} request is already open — click the ${name} icon in Chrome's toolbar to finish it.`;
+  if (code === 4100 || /unauthori[sz]ed|not connected/i.test(raw)) return `${name} hasn't approved this site yet — press Connect ${name} again and approve it.`;
+  if (code === -32603 || /unexpected error|internal error/i.test(raw)) {
+    return `${name} reported "Unexpected error". Unlock ${name}, make sure it has a Solana account${name === 'MetaMask' ? ' (MetaMask → account menu → Add account → Solana)' : ''}, then reload this page and try again.`;
+  }
+  return `${name}: ${raw || 'request failed'}${code !== undefined ? ` (code ${code})` : ''}`;
+}
+
+/** Phantom connect, with one retry: a stale session in the extension answers "Unexpected error". */
+async function phantomConnectWithRetry(provider, opts) {
+  try {
+    return await provider.connect(opts);
+  } catch (err) {
+    const code = err?.code;
+    if (code === 4001 || !(code === -32603 || /unexpected|internal/i.test(String(err?.message || '')))) throw err;
+    try {
+      await provider.disconnect();
+    } catch {
+      // already disconnected
+    }
+    await new Promise((r) => setTimeout(r, 400));
+    return provider.connect(opts);
+  }
+}
+
 /** Phantom's Chrome extension injects its provider shortly after page load; wait for it briefly. */
 async function waitForPhantom(ms = 2500) {
   const start = Date.now();
@@ -4265,7 +4300,7 @@ window.connectPhantom = async function connectPhantom() {
   const btn = document.getElementById('btn-phantom');
   if (btn) btn.disabled = true;
   try {
-    const resp = await provider.connect();
+    const resp = await phantomConnectWithRetry(provider);
     const address = (resp?.publicKey || provider.publicKey)?.toString();
     if (!isRealSolanaAddress(address)) throw new Error('Phantom did not return a Solana address');
     const data = await saveExternalWallet('link-external', address);
@@ -4274,8 +4309,7 @@ window.connectPhantom = async function connectPhantom() {
     showToast(`Phantom linked · ${shortAddr(address)}`, 'good');
     refreshPhantomBalance();
   } catch (err) {
-    const msg = err?.code === 4001 ? 'Connection request was declined in Phantom' : err?.message || 'Phantom connection failed';
-    showToast(msg, 'danger');
+    showToast(walletErrorMessage(err, 'Phantom'), 'danger');
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -5061,7 +5095,7 @@ window.sendSolFromPhantom = async function sendSolFromPhantom() {
       return;
     }
     fundMsg('Waiting for Phantom…');
-    const resp = await provider.connect();
+    const resp = await phantomConnectWithRetry(provider);
     const from = (resp?.publicKey || provider.publicKey)?.toString();
     if (!isRealSolanaAddress(from)) throw new Error('Phantom did not return a Solana address');
     if (from === bot) throw new Error('This Phantom account is the bot wallet itself.');
@@ -5100,8 +5134,7 @@ window.sendSolFromPhantom = async function sendSolFromPhantom() {
     refreshPhantomBalance();
     fetch('/api/real/status').catch(() => {}); // refreshes the bot wallet balance on the server
   } catch (err) {
-    const msg = err?.code === 4001 ? 'You declined the transfer in Phantom — nothing was sent.' : err?.message || 'Phantom transfer failed.';
-    fundMsg(esc(msg), 'bad');
+    fundMsg(esc(walletErrorMessage(err, 'Phantom')), 'bad');
   } finally {
     phantomSendBusy = false;
     if (btn) btn.disabled = false;
@@ -5164,6 +5197,14 @@ function metamaskNotFound() {
   window.open('https://metamask.io/download/', '_blank', 'noopener');
 }
 
+/** The chain id this wallet uses for Solana mainnet (MetaMask uses the full network id). */
+const SOLANA_MAINNET_IDS = ['solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp', 'solana:mainnet', 'solana:mainnet-beta'];
+function solanaMainnetChain(wallet, account) {
+  const offered = [...(account?.chains || []), ...(wallet?.chains || [])].map(String);
+  for (const id of SOLANA_MAINNET_IDS) if (offered.includes(id)) return id;
+  return offered.find((c) => c.startsWith('solana:') && !/devnet|testnet|EtWTRAB|4uhcVJy/i.test(c)) || SOLANA_MAINNET_IDS[0];
+}
+
 async function metamaskConnectAccount() {
   const w = await waitForMetaMask();
   if (!w) {
@@ -5193,8 +5234,7 @@ window.connectMetaMask = async function connectMetaMask() {
     showToast(`MetaMask linked · ${shortAddr(got.account.address)}`, 'good');
     refreshPhantomBalance();
   } catch (err) {
-    const msg = err?.code === 4001 || /reject|denied|cancel/i.test(err?.message || '') ? 'Connection request was declined in MetaMask' : err?.message || 'MetaMask connection failed';
-    showToast(msg, 'danger');
+    showToast(walletErrorMessage(err, 'MetaMask'), 'danger');
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -5238,7 +5278,7 @@ async function sendSolFromMetaMask() {
     tx[0] = 1;
     tx.set(message, 65);
     fundMsg(`Approve sending <strong>${amt} SOL</strong> to the bot wallet in MetaMask…`);
-    const out = await feature.signAndSendTransaction({ account: got.account, transaction: tx, chain: 'solana:mainnet' });
+    const out = await feature.signAndSendTransaction({ account: got.account, transaction: tx, chain: solanaMainnetChain(got.wallet, got.account) });
     const raw = Array.isArray(out) ? out[0]?.signature : out?.signature;
     const sig = raw instanceof Uint8Array ? b58encode(raw) : typeof raw === 'string' ? raw : null;
     if (!sig) throw new Error('MetaMask did not return a transaction id.');
@@ -5259,8 +5299,7 @@ async function sendSolFromMetaMask() {
     refreshPhantomBalance();
     fetch('/api/real/status').catch(() => {});
   } catch (err) {
-    const msg = err?.code === 4001 || /reject|denied|cancel/i.test(err?.message || '') ? 'You declined the transfer in MetaMask — nothing was sent.' : err?.message || 'MetaMask transfer failed.';
-    fundMsg(esc(msg), 'bad');
+    fundMsg(esc(walletErrorMessage(err, 'MetaMask')), 'bad');
   } finally {
     phantomSendBusy = false;
     if (btn) btn.disabled = false;

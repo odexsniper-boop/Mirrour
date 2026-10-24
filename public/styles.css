@@ -6587,7 +6587,7 @@ body, button, input, select, textarea, .kpi-label, .card-title, .term-tab {
 .phantom-fund-msg a { color: inherit; text-decoration: underline; }
 
 /* ===== Deposit window: 20% smaller; Phantom + MetaMask side by side ===== */
-#modal-deposit .modal-box { zoom: 0.8; }
+#modal-deposit .modal-box { zoom: 0.88; }
 .wallet-connect-row { display: flex; gap: 10px; }
 .wallet-connect-row .btn-phantom { flex: 1 1 0; min-width: 0; white-space: nowrap; }
 .btn-metamask { background: #f6a55c !important; border-color: #f6a55c !important; color: #1f1306 !important; }

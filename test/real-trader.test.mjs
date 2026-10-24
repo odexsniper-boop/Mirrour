@@ -425,3 +425,53 @@ test('audit2: daily loss limit is a rolling 24 h window and counts only the same
   assert.equal(e.positions.length, 1, 'pause lifted: no paper losses in the last 24 h');
   assert.equal(e.settings.risk.dailyLossTriggered, false);
 });
+
+// ---------- final check (Oct 24) ----------
+
+test('final: a trade size above the SOL cap is bought AT the cap (not refused every time)', async () => {
+  const { w, trader } = world();
+  const { e, f } = engineFor(trader, { size: 50 }); // $50 = 0.25 SOL at $200
+  trader.caps.maxSolPerTrade = 0.05;
+  e.adapter.realBuyRoomUsd = () => trader.buyRoomUsd();
+  const [r] = await e.processTraderSignal(buySig(f));
+  assert.equal(r.status, 'filled', JSON.stringify(r));
+  assert.equal(w.sent.length, 1);
+  const spentSol = trader.spent24hSol();
+  assert.ok(spentSol <= 0.05 + 1e-9 && spentSol > 0.04, `bought at the cap (${spentSol} SOL)`);
+});
+
+test('final: once the daily SOL cap is used up, buys are skipped before any quote is requested', async () => {
+  const { w, trader } = world();
+  const { e, f } = engineFor(trader, { size: 50 });
+  trader.caps.maxSolPerDay = 0.3;
+  e.adapter.realBuyRoomUsd = () => trader.buyRoomUsd();
+  await e.processTraderSignal(buySig(f)); // 0.25 SOL
+  const ordersBefore = w.orders;
+  await e.processTraderSignal(buySig(f)); // only 0.05 SOL left → bought at 0.05
+  await e.processTraderSignal(buySig(f)); // nothing left
+  assert.ok(trader.spent24hSol() <= 0.3 + 1e-9, `never over the daily cap (${trader.spent24hSol()})`);
+  assert.match(e.history[0].reason || '', /limit reached/);
+  assert.equal(w.orders, ordersBefore + 1, 'no quote for the refused buy');
+});
+
+test('final: a real position is never "sold" on paper when real trading becomes unavailable', async () => {
+  const { w, trader } = world();
+  const { e, f } = engineFor(trader, { mode: 'buy-hold' });
+  f.exitRules = createDefaultExitRules({ hardTimeCap: { enabled: true, timeCapSec: 10 } });
+  await e.processTraderSignal(buySig(f));
+  const p = e.positions[0];
+  const tokensBefore = p.remainingTokens;
+  e.adapter.realEnabled = () => false; // e.g. another copy of the bot is running
+  const r = await e.executePositionSell(p.id, { sellPct: 100 });
+  assert.equal(r.ok, false);
+  assert.equal(r.realUnavailable, true);
+  assert.equal(p.remainingTokens, tokensBefore, 'position untouched');
+  assert.equal(w.sent.length, 1, 'only the buy was ever sent');
+  assert.ok(!e.history.some((h) => h.side === 'sell' && h.status === 'filled'), 'no fake sell booked');
+  assert.ok(e.alerts.some((a) => /real trading is off/.test(a.title)));
+  // back on: the exit goes through for real
+  e.adapter.realEnabled = () => trader.ready();
+  const r2 = await e.executePositionSell(p.id, { sellPct: 100 });
+  assert.notEqual(r2.ok, false, JSON.stringify(r2));
+  assert.equal(w.sent.length, 2);
+});

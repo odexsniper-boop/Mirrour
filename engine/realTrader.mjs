@@ -160,6 +160,16 @@ export class RealTrader {
     return this.spendLog.reduce((a, x) => a + x.sol, 0);
   }
 
+  /** USD a real buy may use right now under the per-trade and 24 h caps (NaN if SOL price unknown). */
+  buyRoomUsd() {
+    const px = Number(this.solPrice()) || 0;
+    if (!(px > 0)) return NaN;
+    const perTrade = this.caps.maxSolPerTrade > 0 ? this.caps.maxSolPerTrade : Infinity;
+    const daily = this.caps.maxSolPerDay > 0 ? Math.max(0, this.caps.maxSolPerDay - this.spent24hSol() - this.pendingBuySol) : Infinity;
+    const sol = Math.min(perTrade, daily);
+    return Number.isFinite(sol) ? sol * px * 0.999 : Infinity;
+  }
+
   status() {
     return {
       configured: Boolean(this.keypair),

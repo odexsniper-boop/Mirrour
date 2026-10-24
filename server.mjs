@@ -82,7 +82,7 @@ if (persistence && supabase.enabled && !db.get('engine')) {
   try {
     const rows = await supabase.pullAll();
     if (rows.get('engine')) {
-      db.setMany([...rows.entries()].filter(([k]) => k === 'engine' || k === 'liveSignals'));
+      db.setMany([...rows.entries()].filter(([k]) => k === 'engine' || k === 'liveSignals' || k === 'realTrader'));
       console.log('Database: restored from Supabase (local database was empty)');
     }
   } catch (err) {
@@ -109,12 +109,43 @@ export const realTrader = new RealTrader({
     } catch {
       // saving the trade log is best-effort
     }
+    // also to Supabase: on Railway the local disk is wiped on every deploy, and the 24 h SOL cap
+    // must not reset with it
+    if (supabase.enabled) supabase.push([['realTrader', realTrader.exportState()]]).catch(() => {});
   },
 });
 engine.adapter.liveHooks = realTrader.hooks();
 // On a public deploy, real trading needs a site password (otherwise anyone with the link could trade)
 const realBlockedReason = ON_RAILWAY && !SITE_PASSWORD ? 'public deploy without ODEX_PASSWORD: real trading is disabled' : null;
-engine.adapter.realEnabled = () => realTrader.ready() && !realBlockedReason;
+// One bot at a time: when another copy of Odex Mirror (PC or Railway) is running on the same
+// Supabase account, this one does not trade real SOL (two copies would buy everything twice).
+const INSTANCE_ID = `${ON_RAILWAY ? 'railway' : 'pc'}-${Math.random().toString(36).slice(2, 10)}`;
+let otherInstance = null; // { id, host, at } of the other running copy, if any
+async function instanceHeartbeat() {
+  if (!supabase.enabled) return;
+  try {
+    const rows = await supabase.request('GET', '?key=eq.instance_lock&select=value');
+    const cur = Array.isArray(rows) ? rows[0]?.value : null;
+    const now = Date.now();
+    if (cur && cur.id !== INSTANCE_ID && now - Number(cur.at || 0) < 75_000) {
+      if (!otherInstance) {
+        console.log(`Another Odex Mirror is running on this Supabase account (${cur.host}). Real trading is off here until it stops.`);
+        engine.alerts.unshift({ id: `alt-inst-${now}`, level: 'danger', title: `Another copy of Odex Mirror is running (${cur.host})`, message: 'Two copies on one account overwrite each other and would buy everything twice. Real trading is off on this copy until the other one is stopped.', timestamp: now });
+        engine.emit('alerts_updated', {});
+      }
+      otherInstance = cur;
+      return;
+    }
+    otherInstance = null;
+    await supabase.push([['instance_lock', { id: INSTANCE_ID, host: ON_RAILWAY ? 'Railway' : 'your PC', at: now }]]);
+  } catch {
+    // Supabase unreachable: keep the last known state
+  }
+}
+instanceHeartbeat();
+setInterval(instanceHeartbeat, 25_000).unref?.();
+engine.adapter.realEnabled = () => realTrader.ready() && !realBlockedReason && !otherInstance;
+engine.adapter.realBuyRoomUsd = () => realTrader.buyRoomUsd();
 engine.realTradingActive = () => !engine.settings.paperTrading && engine.adapter.realEnabled();
 
 // Real balance of the bot wallet → the engine's wallet balances (used for sizing and spend checks)
@@ -1528,6 +1559,8 @@ function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
   liveSignals.watcher.stop();
+  // free the one-bot-at-a-time lock so another copy can take over right away
+  if (supabase.enabled && !otherInstance) supabase.push([['instance_lock', { id: INSTANCE_ID, host: 'stopped', at: 0 }]]).catch(() => {});
   const done = () => process.exit(0);
   setTimeout(done, 4000).unref?.(); // never hang on exit
   if (!persistence) return done();

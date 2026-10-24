@@ -633,6 +633,15 @@ export class CopyTradingEngine {
       return this.recordSkip({ dryRun, follow, wallet, signal, reason: 'real trading is not set up (add ODEX_TRADER_KEY to .env, or turn Paper Trading on)' });
     }
     const buyAssetMode = follow.chainId === 'arc' ? 'stable' : this.settings.tradingAsset[follow.chainId] || 'stable';
+    // Real buys: a trade size above the SOL caps (e.g. $50 with a 0.05 SOL limit) is bought at the
+    // cap instead of being refused every time; nothing is bought once the daily cap is used up
+    if (real && typeof this.adapter.realBuyRoomUsd === 'function') {
+      const room = Number(this.adapter.realBuyRoomUsd());
+      if (Number.isFinite(room)) {
+        if (room < 1) return this.recordSkip({ dryRun, follow, wallet, signal, reason: 'real-trading SOL limit reached for today' });
+        desiredUsd = Math.min(desiredUsd, room);
+      }
+    }
 
     // A paper copy can never buy cheaper than the trader did: their own buy already pushed the
     // price up, and the market feed (cached up to 60 s) often lags fast launches. Our own paper
@@ -928,6 +937,24 @@ export class CopyTradingEngine {
 
     let tokensSold = pos.remainingTokens * fraction;
     const real = !pos.isPaper && this.adapter.useLive?.({ paper: false, chainId: pos.chainId });
+    // A real position can only be sold for real. If real trading is unavailable right now (key not
+    // loaded, site password missing, another copy of the bot running), never fake the sale on paper:
+    // that would book a sell while the tokens stay in the wallet.
+    if (pos.isPaper === false && !real) {
+      const now = Date.now();
+      if (!pos.lastSellBlockedAlertAt || now - pos.lastSellBlockedAlertAt > 60_000) {
+        pos.lastSellBlockedAlertAt = now;
+        this.alerts.unshift({
+          id: `alt-${randomUUID().slice(0, 8)}`,
+          level: 'danger',
+          title: `Real sell waiting — real trading is off ($${pos.symbol})`,
+          message: 'This real position cannot be sold until real trading is available again on this copy (bot key, site password, only one copy running). It stays open and exits resume automatically.',
+          timestamp: now,
+        });
+        this.emit('alerts_updated', {});
+      }
+      return { ok: false, error: 'Real trading is unavailable on this copy, so this real position was not sold.', realFailed: true, realUnavailable: true };
+    }
     // a full sell of the only real position in this token sells the whole wallet balance (no dust)
     const othersInMint = this.positions.some((p) => p.id !== pos.id && p.tokenAddress === pos.tokenAddress && p.remainingTokens > 0 && !p.isPaper);
     const tokenAmount = real && fraction >= 0.9999 && !othersInMint ? 'all' : tokensSold;
