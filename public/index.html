@@ -475,6 +475,9 @@
             <button type="button" class="cfg-nav-btn" data-cfg="notifications" onclick="openSettingsSection('notifications')">
               <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span><span class="cfg-nav-txt"><strong>Notifications</strong><small>Pop-ups and sound</small></span>
             </button>
+            <button type="button" class="cfg-nav-btn" data-cfg="integrations" onclick="openSettingsSection('integrations')">
+              <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg></span><span class="cfg-nav-txt"><strong>Integrations</strong><small>Telegram, Discord alerts</small></span>
+            </button>
             <button type="button" class="cfg-nav-btn" data-cfg="data" onclick="openSettingsSection('data')">
               <span class="cfg-nav-ico"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg></span><span class="cfg-nav-txt"><strong>Data & storage</strong><small>Database, backups, Supabase</small></span>
             </button>
@@ -813,6 +816,68 @@
           </div>
         </div>
             </section>
+            <section class="cfg-section" data-cfg="integrations">
+        <div class="card">
+          <div class="card-header"><div class="card-title-group"><span class="title-icon tone-indigo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><path d="M17.5 14v7M14 17.5h7"/></svg></span><div><h3 class="card-title">Integrations</h3><p class="card-sub">Get every copy, sell and problem on your phone — even when this page is closed.</p></div></div></div>
+          <div class="intg-list" id="intg-list">
+            <div class="intg-card" data-app="telegram">
+              <div class="intg-head">
+                <span class="intg-logo intg-logo-tg"><img src="/icons/telegram.svg" alt="" width="26" height="26" /></span>
+                <div class="intg-title"><strong>Telegram</strong><small>Alerts from your own Telegram bot</small></div>
+                <span class="intg-pill" id="intg-tg-pill">Not connected</span>
+              </div>
+              <div class="intg-body">
+                <ol class="intg-steps">
+                  <li>In Telegram, open <a href="https://t.me/BotFather" target="_blank" rel="noopener">@BotFather</a>, send <code>/newbot</code> and copy the token it gives you.</li>
+                  <li>Open your new bot and press <b>Start</b> (send it any message).</li>
+                  <li>Paste the token below and press <b>Find my chat</b>.</li>
+                </ol>
+                <div class="intg-row">
+                  <input type="password" id="intg-tg-token" class="input mono" placeholder="Bot token, e.g. 123456789:AAH…" autocomplete="off" spellcheck="false" />
+                  <button type="button" class="btn" onclick="intgFindTelegramChat()">Find my chat</button>
+                </div>
+                <div class="intg-row">
+                  <input type="text" id="intg-tg-chat" class="input mono" placeholder="Chat ID (filled in for you)" autocomplete="off" spellcheck="false" />
+                  <button type="button" class="btn btn-primary" onclick="intgSave('telegram')">Save</button>
+                </div>
+                <div class="intg-events" data-app="telegram"></div>
+                <div class="intg-actions">
+                  <label class="switch-row"><input type="checkbox" class="rule-toggle" id="intg-tg-enabled" onchange="intgToggle('telegram', this.checked)" /><span>Send alerts</span></label>
+                  <button type="button" class="btn btn-sm" onclick="intgTest('telegram')">Send test</button>
+                  <button type="button" class="btn btn-sm btn-ghost-danger" onclick="intgDisconnect('telegram')">Disconnect</button>
+                </div>
+                <div class="intg-msg" id="intg-tg-msg" role="status"></div>
+              </div>
+            </div>
+
+            <div class="intg-card" data-app="discord">
+              <div class="intg-head">
+                <span class="intg-logo intg-logo-dc"><img src="/icons/discord.svg" alt="" width="24" height="24" /></span>
+                <div class="intg-title"><strong>Discord</strong><small>Alerts in a Discord channel</small></div>
+                <span class="intg-pill" id="intg-dc-pill">Not connected</span>
+              </div>
+              <div class="intg-body">
+                <ol class="intg-steps">
+                  <li>In Discord: channel settings → <b>Integrations</b> → <b>Webhooks</b> → <b>New Webhook</b>.</li>
+                  <li>Press <b>Copy Webhook URL</b> and paste it below.</li>
+                </ol>
+                <div class="intg-row">
+                  <input type="password" id="intg-dc-hook" class="input mono" placeholder="https://discord.com/api/webhooks/…" autocomplete="off" spellcheck="false" />
+                  <button type="button" class="btn btn-primary" onclick="intgSave('discord')">Save</button>
+                </div>
+                <div class="intg-events" data-app="discord"></div>
+                <div class="intg-actions">
+                  <label class="switch-row"><input type="checkbox" class="rule-toggle" id="intg-dc-enabled" onchange="intgToggle('discord', this.checked)" /><span>Send alerts</span></label>
+                  <button type="button" class="btn btn-sm" onclick="intgTest('discord')">Send test</button>
+                  <button type="button" class="btn btn-sm btn-ghost-danger" onclick="intgDisconnect('discord')">Disconnect</button>
+                </div>
+                <div class="intg-msg" id="intg-dc-msg" role="status"></div>
+              </div>
+            </div>
+          </div>
+          <p class="intg-foot">Your bot token and webhook stay on the server — they are never shown in the browser again after saving.</p>
+        </div>
+            </section>
             <section class="cfg-section" data-cfg="notifications">
         <div class="card">
           <div class="card-header"><div class="card-title-group"><span class="title-icon tone-amber"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg></span><div><h3 class="card-title">Notifications</h3><p class="card-sub">Which pop-ups appear in the corner. Everything is still recorded in History either way.</p></div></div></div>
@@ -887,41 +952,11 @@
       <div class="page-head">
         <div>
           <h1 class="page-title">How the engine works</h1>
-          <p class="page-sub">Every copied trade passes six steps, then the exit engine re-checks five rules every 2 seconds.</p>
+          <p class="page-sub">Every copied trade passes six steps, then the exit engine re-checks your rules every 2 seconds. Values below are your live settings.</p>
         </div>
       </div>
-
-      <div class="card">
-        <div class="card-header"><div class="card-title-group"><span class="title-icon tone-indigo"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg></span><h2 class="card-title">6-step copy pipeline</h2></div></div>
-        <ol class="pipeline">
-          <li><span class="pipe-num">1</span><div><strong>Watch</strong><p>The Solana wallets you follow, read live from the blockchain.</p></div></li>
-          <li><span class="pipe-num">2</span><div><strong>Filter</strong><p>Entry filters and token safety audit.</p></div></li>
-          <li><span class="pipe-num">3</span><div><strong>Size</strong><p>Fixed $, % of balance, or proportional 1:1.</p></div></li>
-          <li><span class="pipe-num">4</span><div><strong>Verify</strong><p>Slippage and the 25% max-chase guard.</p></div></li>
-          <li><span class="pipe-num">5</span><div><strong>Execute</strong><p>Paper trade filled at the live market price (no real funds).</p></div></li>
-          <li><span class="pipe-num">6</span><div><strong>Exit</strong><p>Hand-off to the 5-rule auto-exit engine.</p></div></li>
-        </ol>
-      </div>
-
-      <div class="grid-2">
-        <div class="card">
-          <div class="card-header"><div class="card-title-group"><span class="title-icon tone-purple"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg></span><h2 class="card-title">5-rule auto-exit</h2></div><span class="pill-soft">Checked every 2s</span></div>
-          <div class="rule-list">
-            <div class="rule-item"><span class="rule-num">1</span><div><strong>Take Initials</strong><p>At a target gain (e.g. +25%), sell the main chunk (75%) and keep a moonbag.</p></div></div>
-            <div class="rule-item"><span class="rule-num">2</span><div><strong>Moonbag Trail</strong><p>Trailing stop off the peak (e.g. 25%), armed once the position is up +10%.</p></div></div>
-            <div class="rule-item"><span class="rule-num">3</span><div><strong>Two-Stage Floor</strong><p>A wide opening stop (−45%) that tightens to −20% after 50 seconds.</p></div></div>
-            <div class="rule-item"><span class="rule-num">4</span><div><strong>Wave-Cut</strong><p>Exit after 90 seconds if the peak never reached +5%.</p></div></div>
-            <div class="rule-item"><span class="rule-num">5</span><div><strong>Hard Time Cap</strong><p>Close the main position after 300 seconds, leaving the moonbag.</p></div></div>
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-header"><div class="card-title-group"><span class="title-icon tone-green"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></span><h2 class="card-title">Execution protection</h2></div></div>
-          <div class="rule-list">
-            <div class="rule-item"><span class="rule-num rule-num-green"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><div><strong>Max Chase (25%)</strong><p>Compares your quote to the leader's fill and skips if the price already ran past the threshold.</p></div></div>
-            <div class="rule-item"><span class="rule-num rule-num-green"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><div><strong>Honeypot block</strong><p>Skips tokens flagged as honeypots (tokens that cannot be sold).</p></div></div>
-            <div class="rule-item"><span class="rule-num rule-num-green"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><div><strong>Freeze / mint authority block</strong><p>Skips Solana tokens whose freeze or mint authority is still active.</p></div></div>
-          </div>
-        </div>
+      <div id="docs-live">
+        <div class="docs-loading">Loading your engine settings…</div>
       </div>
     </section>
   </main>
@@ -1004,6 +1039,90 @@
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('modal-copy')">Cancel</button>
         <button class="btn btn-primary" onclick="submitCreateFollow()">Confirm &amp; Start Copying</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- MODAL: EDIT TRADER SETTINGS -->
+  <div id="modal-edit-follow" class="modal-backdrop">
+    <div class="modal-box">
+      <div class="card-header">
+        <h3 class="card-title">Trader settings <span class="ef-who mono" id="ef-who"></span></h3>
+        <button class="btn-icon" onclick="closeModal('modal-edit-follow')" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <p class="modal-lead">Changes apply to this trader's next copies. Open positions keep running.</p>
+      <input type="hidden" id="ef-id" />
+      <div class="form-row">
+        <div class="field">
+          <label for="ef-name">Name</label>
+          <input type="text" id="ef-name" class="input" maxlength="32" placeholder="e.g. Whale 1" />
+        </div>
+        <div class="field">
+          <label for="ef-mode">When they sell</label>
+          <select id="ef-mode" class="input" onchange="onEditFollowMode()">
+            <option value="auto-exit">Auto-Exit: my exit rules decide</option>
+            <option value="mirror">Mirror: sell when they sell</option>
+            <option value="buy-and-hold">Buy &amp; Hold: only TP / SL</option>
+          </select>
+        </div>
+      </div>
+      <div class="ef-hint" id="ef-mode-hint"></div>
+      <div class="form-row">
+        <div class="field">
+          <label for="ef-sizing-type">Size each copy by</label>
+          <select id="ef-sizing-type" class="input" onchange="onEditFollowSizing()">
+            <option value="fixed">Fixed $ per trade</option>
+            <option value="percent">% of my balance</option>
+            <option value="proportional">Same $ as trader (with cap)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="ef-sizing-amount" id="ef-sizing-label">Amount ($)</label>
+          <input type="number" id="ef-sizing-amount" class="input mono" min="0.1" step="any" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="field">
+          <label for="ef-tp">Take profit %</label>
+          <input type="number" id="ef-tp" class="input mono" placeholder="Off" min="1" step="any" />
+        </div>
+        <div class="field">
+          <label for="ef-sl">Stop loss %</label>
+          <input type="number" id="ef-sl" class="input mono" placeholder="Off" min="1" max="99" step="any" />
+        </div>
+      </div>
+      <div class="form-row form-row-3">
+        <div class="field">
+          <label for="ef-min-trade">Skip trader buys under ($)</label>
+          <input type="number" id="ef-min-trade" class="input mono" min="0" step="any" />
+        </div>
+        <div class="field">
+          <label for="ef-max-open">Max open positions</label>
+          <input type="number" id="ef-max-open" class="input mono" min="1" step="1" />
+        </div>
+        <div class="field">
+          <label for="ef-max-risk">Max at risk ($)</label>
+          <input type="number" id="ef-max-risk" class="input mono" min="1" step="any" />
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="field">
+          <label for="ef-pump">Pump-only for this trader</label>
+          <select id="ef-pump" class="input">
+            <option value="">Use account setting</option>
+            <option value="true">ON — only pump.fun coins</option>
+            <option value="false">OFF — any coin</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>Exit rules</label>
+          <button type="button" class="btn ef-rules-btn" id="ef-rules-btn" onclick="openExitRulesFromEdit()">Edit exit rules <span class="mono rule-count" id="ef-rules-count">0/5</span></button>
+        </div>
+      </div>
+      <div class="ef-msg" id="ef-msg" role="status"></div>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-edit-follow')">Cancel</button>
+        <button class="btn btn-primary" id="ef-save" onclick="saveEditFollow()">Save settings</button>
       </div>
     </div>
   </div>

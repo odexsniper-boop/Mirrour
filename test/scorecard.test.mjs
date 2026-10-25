@@ -87,3 +87,23 @@ test('auto-pause: slow detection alone also pauses; auto-pause off only reports'
   for (let i = 0; i < 3; i++) await roundTrip(b.e, b.f, i, { ourEntry: 1.4, traderExit: 1.5, lag: 30 });
   assert.equal(b.f.status, 'copying');
 });
+
+test('missed entry: when the trader’s first buy ran too far to copy, their top-ups are not bought late either', async () => {
+  const { e, f } = setup();
+  e.settings.copyTopUps = false;
+  e.settings.maxChasePct = 25;
+  const mint = `${MINT.slice(0, -4)}7777`;
+  // trader bought at 1.00, market already at 1.40 when we see it → chased, skipped
+  const [a] = await e.processTraderSignal({ chainId: 'solana', side: 'buy', traderWallet: f.traderWallet, traderBuyUsd: 300, signature: 'm1', ageSec: 3, token: { ...tok(1, mint), currentPriceUsd: 1.4 } });
+  assert.equal(a.status, 'skipped');
+  assert.match(a.reason, /price moved too far/);
+  // 2 min later a small top-up at the pumped price must NOT be copied as a fresh entry
+  const [b] = await e.processTraderSignal({ chainId: 'solana', side: 'buy', traderWallet: f.traderWallet, traderBuyUsd: 4, signature: 'm2', ageSec: 1, token: tok(1.45, mint) });
+  assert.equal(b.status, 'skipped');
+  assert.match(b.reason, /too late to copy/);
+  assert.equal(e.positions.filter((p) => p.tokenAddress === mint).length, 0);
+  // the trader fully exits → their next buy is a fresh entry and is copied
+  await e.processTraderSignal({ chainId: 'solana', side: 'sell', sellSharePct: 100, traderWallet: f.traderWallet, signature: 'm3', token: tok(1.2, mint) });
+  const [c] = await e.processTraderSignal({ chainId: 'solana', side: 'buy', traderWallet: f.traderWallet, traderBuyUsd: 100, signature: 'm4', ageSec: 1, token: tok(1, mint) });
+  assert.equal(c.status, 'filled', JSON.stringify(c));
+});

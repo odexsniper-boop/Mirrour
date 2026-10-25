@@ -811,6 +811,125 @@ function renderTerminalAll() {
   renderHistoryTable();
   renderClosedPositions();
   renderTraderFilterBar();
+  renderDocsView();
+}
+
+// ---------------------------------------------------------------------------
+// "How the engine works" page: the six copy steps, exit rules and protections with live values
+// ---------------------------------------------------------------------------
+const DOC_ICONS = {
+  watch: '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
+  filter: '<polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"/>',
+  size: '<line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>',
+  verify: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/>',
+  execute: '<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+  exit: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
+  initials: '<polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>',
+  trail: '<path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/>',
+  floor: '<line x1="3" y1="20" x2="21" y2="20"/><polyline points="3 6 9 12 13 9 21 16"/>',
+  wave: '<path d="M2 12c2-3 4-3 6 0s4 3 6 0 4-3 6 0"/>',
+  clock: '<circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>',
+  shield: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>',
+  lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+  pause: '<rect x="6" y="4" width="4" height="16" rx="1"/><rect x="14" y="4" width="4" height="16" rx="1"/>',
+  cap: '<circle cx="12" cy="12" r="10"/><line x1="4.9" y1="4.9" x2="19.1" y2="19.1"/>',
+  one: '<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
+  radar: '<circle cx="12" cy="12" r="2"/><path d="M16.24 7.76a6 6 0 0 1 0 8.49M7.76 16.24a6 6 0 0 1 0-8.49M19.07 4.93a10 10 0 0 1 0 14.14M4.93 19.07a10 10 0 0 1 0-14.14"/>',
+};
+const docIcon = (k, size = 18) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${DOC_ICONS[k] || ''}</svg>`;
+
+function renderDocsView() {
+  const root = document.getElementById('docs-live');
+  if (!root || !engineState) return;
+  const st = engineState.settings || {};
+  const paper = st.paperTrading !== false;
+  const follows = engineState.follows || [];
+  const f = follows.find((x) => x.status === 'copying') || follows[0] || null;
+  const R = (f?.exitRules && typeof f.exitRules === 'object' ? f.exitRules : null) || {};
+  const rule = (k, d) => ({ ...d, ...(R[k] || {}) });
+  const ti = rule('takeInitials', { enabled: false, takeAtPct: 25, sellSizePct: 75 });
+  const mt = rule('moonbagTrail', { enabled: false, trailPct: 25, armsAtPct: 10 });
+  const fl = rule('floor', { enabled: false, openingFloorPct: 45, tightensAfterSec: 50, tightFloorPct: 20 });
+  const wc = rule('waveCut', { enabled: false, afterSec: 90, needsPeakPct: 5 });
+  const tc = rule('hardTimeCap', { enabled: false, timeCapSec: 300 });
+  const autoExit = f?.mode === 'auto-exit';
+  const stream = liveWatch?.status?.stream || {};
+  const provider = stream.provider === 'helius' ? 'Helius' : stream.provider === 'alchemy' ? 'Alchemy' : stream.provider === 'public' ? 'public RPC' : 'RPC';
+  const scores = f ? engineState.traderScores?.[f.id] : null;
+  const bot = window.__botStatus || null;
+  const sc = { autoPause: true, minTrades: 10, maxSlipPct: 20, maxLagSec: 10, ...(st.scorecard || {}) };
+  const sizing = f ? (f.sizing.type === 'fixed' ? `$${f.sizing.amount} per trade` : f.sizing.type === 'percent' ? `${f.sizing.amount}% of balance` : `1:1, cap $${f.sizing.amount}`) : 'Set when you copy a trader';
+  const capSol = bot?.caps?.maxSolPerTrade;
+  const chip = (text, tone = '') => `<span class="dx-chip ${tone}">${text}</span>`;
+  const onOff = (on) => (on ? chip('ON', 'is-on') : chip('OFF', 'is-off'));
+
+  const steps = [
+    ['watch', 'Watch', 'Every swap of the wallets you follow, pushed live from the blockchain.', `${chip(`${provider} live`, stream.connected ? 'is-on' : 'is-off')} ${chip(`${follows.filter((x) => x.status === 'copying').length} copying`)}`],
+    ['filter', 'Filter', 'Your entry filters plus the token safety audit.', `${chip(`Safety ${st.safety?.blockRiskyCoins ? 'ON' : 'OFF'}`, st.safety?.blockRiskyCoins ? 'is-on' : 'is-off')} ${st.filters?.pumpOnly ? chip('Pump-only') : ''}`],
+    ['size', 'Size', 'Fixed $, % of balance, or the trader’s own size with a cap.', `${chip(esc(sizing))}${!paper && capSol ? ` ${chip(`max ${capSol} SOL`)}` : ''}`],
+    ['verify', 'Verify', 'Price check against the trader’s fill and your slippage.', `${chip(`Max chase ${st.maxChasePct ?? 25}%`)} ${chip(`Buy slip ${st.buySlippagePct?.solana ?? 15}%`)}`],
+    ['execute', 'Execute', paper ? 'Paper fill at the live price, with real fees modelled.' : 'Real swap through Jupiter, signed by the bot wallet.', paper ? chip('Paper', 'is-paper') : chip('<span class="dx-dot"></span>Real SOL', 'is-live')],
+    ['exit', 'Exit', autoExit ? 'Hand-off to your auto-exit rules, checked every 2 s.' : f?.mode === 'mirror' ? 'Sells when the trader sells (Mirror).' : 'Held until take-profit / stop-loss.', chip(autoExit ? `${[ti, mt, fl, wc, tc].filter((r) => r.enabled).length}/5 rules on` : f?.mode === 'mirror' ? 'Mirror' : 'Buy & Hold')],
+  ];
+
+  const rules = [
+    ['initials', 'Take Initials', `At <b>+${ti.takeAtPct}%</b> sell <b>${ti.sellSizePct}%</b>, keep a moonbag.`, ti.enabled],
+    ['trail', 'Moonbag Trail', `Trailing stop <b>${mt.trailPct}%</b> off the peak, armed at <b>+${mt.armsAtPct}%</b>.`, mt.enabled],
+    ['floor', 'Two-Stage Floor', `Stop at <b>−${fl.openingFloorPct}%</b>, tightening to <b>−${fl.tightFloorPct}%</b> after <b>${fl.tightensAfterSec}s</b>.`, fl.enabled],
+    ['wave', 'Wave-Cut', `Exit after <b>${wc.afterSec}s</b> if the peak never reached <b>+${wc.needsPeakPct}%</b>.`, wc.enabled],
+    ['clock', 'Hard Time Cap', `Close the main position after <b>${tc.timeCapSec}s</b>.`, tc.enabled],
+  ];
+
+  const prot = [
+    ['verify', 'Max chase', `Skips a copy if the price already ran more than <b>${st.maxChasePct ?? 25}%</b> past the trader’s fill.`, true],
+    ['shield', 'Honeypot block', 'Never buys tokens flagged as unsellable.', true],
+    ['lock', 'Freeze / mint authority', 'Skips Solana tokens whose freeze authority is still active.', Boolean(st.safety?.blockRiskyCoins)],
+    ['pause', 'Auto-pause slow traders', `Pauses a trader after ${sc.minTrades} copies if total slip &gt; ${sc.maxSlipPct}% or delay &gt; ${sc.maxLagSec}s.`, Boolean(sc.autoPause)],
+    ['cap', 'Real SOL limits', bot?.configured ? `Max <b>${bot.caps?.maxSolPerTrade} SOL</b> per buy, <b>${bot.caps?.maxSolPerDay} SOL</b> per day, ${bot.caps?.reserveSol} SOL kept for fees.` : 'Per-buy and daily SOL caps apply once the bot wallet is set up.', Boolean(bot?.configured)],
+    ['one', 'One bot at a time', 'A second running copy on the same account can’t trade real SOL.', true],
+  ];
+
+  const stats = [
+    ['execute', 'Mode', paper ? 'Paper' : 'Real SOL', paper ? '' : 'is-live'],
+    ['radar', 'Detect delay', scores?.avgLagSec != null ? `${Number(scores.avgLagSec).toFixed(1)}s` : '—', scores?.avgLagSec != null && scores.avgLagSec <= sc.maxLagSec ? 'is-good' : ''],
+    ['clock', 'Exit checks', 'every 2s', ''],
+    ['initials', 'Win rate', scores?.winRatePct != null ? `${scores.winRatePct.toFixed(0)}%` : '—', scores?.winRatePct >= 50 ? 'is-good' : ''],
+  ];
+
+  const html = `
+    <div class="dx-stats">${stats.map(([ic, k, v, tone]) => `<div class="dx-stat"><span class="dx-stat-ic">${docIcon(ic, 16)}</span><div><span class="dx-stat-k">${k}</span><strong class="dx-stat-v ${tone}">${v}</strong></div></div>`).join('')}</div>
+
+    <div class="dx-card dx-glow">
+      <div class="dx-head"><span class="dx-head-ic">${docIcon('radar', 16)}</span><h3>Copy pipeline</h3><span class="dx-head-sub">every trade, in order</span></div>
+      <ol class="dx-pipe">${steps.map(([ic, t, d, live], i) => `
+        <li class="dx-step">
+          <div class="dx-step-top"><span class="dx-step-ic">${docIcon(ic)}</span><span class="dx-step-n">${String(i + 1).padStart(2, '0')}</span></div>
+          <strong>${t}</strong>
+          <p>${d}</p>
+          <div class="dx-step-live">${live}</div>
+        </li>`).join('')}
+      </ol>
+    </div>
+
+    <div class="dx-grid">
+      <div class="dx-card">
+        <div class="dx-head"><span class="dx-head-ic">${docIcon('exit', 16)}</span><h3>Auto-exit rules</h3><span class="dx-head-sub">${f ? `${esc(f.name || f.handle)} · ${autoExit ? 'auto-exit' : esc(f.mode)}` : 'no trader yet'}</span>${f ? `<button class="btn btn-sm dx-head-btn" onclick="openExitRulesModal('${f.id}')">Edit rules</button>` : ''}</div>
+        ${!autoExit && f ? `<div class="dx-note">This trader is in ${esc(f.mode.replace(/-/g, ' '))} mode, so these rules are not used.</div>` : ''}
+        <div class="dx-list">${rules.map(([ic, t, d, on]) => `
+          <div class="dx-row ${on ? '' : 'is-muted'}"><span class="dx-row-ic">${docIcon(ic, 16)}</span><div class="dx-row-main"><strong>${t}</strong><p>${d}</p></div>${onOff(on)}</div>`).join('')}
+        </div>
+      </div>
+      <div class="dx-card">
+        <div class="dx-head"><span class="dx-head-ic">${docIcon('shield', 16)}</span><h3>Protection</h3><span class="dx-head-sub">checked on every copy</span></div>
+        <div class="dx-list">${prot.map(([ic, t, d, on]) => `
+          <div class="dx-row ${on ? '' : 'is-muted'}"><span class="dx-row-ic">${docIcon(ic, 16)}</span><div class="dx-row-main"><strong>${t}</strong><p>${d}</p></div>${onOff(on)}</div>`).join('')}
+        </div>
+      </div>
+    </div>`;
+  if (root.__lastHtml !== html) {
+    root.__lastHtml = html;
+    root.innerHTML = html;
+  }
 }
 
 function durationShort(ms) {
@@ -1427,6 +1546,7 @@ function renderFollowsList() {
             </div>
             <div class="card-actions">
               <button class="btn btn-sm" onclick="toggleFollowStatus('${f.id}', '${isCopying ? 'paused' : 'copying'}')">${isCopying ? 'Pause' : 'Resume'}</button>
+              <button class="btn btn-sm" onclick="openEditFollowModal('${f.id}')">Settings</button>
               <button class="btn btn-indigo-soft btn-sm" onclick="openExitRulesModal('${f.id}')">Exit rules <span class="mono rule-count">${activeExitCount}/5</span></button>
               <button class="btn btn-ghost-danger btn-sm" onclick="removeFollow('${f.id}')">Remove</button>
             </div>
@@ -3058,7 +3178,7 @@ function decisionHtml(sig) {
       .map((c) =>
         c.ok
           ? `<span class="decision d-copied" title="Copied for ${esc(c.handle)}">Copied${sig.copies.length > 1 ? ` · ${esc(c.handle)}` : ''}</span>`
-          : `<span class="decision d-skip" title="${esc(c.reason || '')}">Skip · ${esc(c.reason || c.status || 'not copied')}</span>`
+          : skipBadge(c.reason || c.status)
       )
       .join(' ');
   }
@@ -3072,7 +3192,7 @@ function decisionHtml(sig) {
       }
       if (d.status === 'watch_only') return '<span class="decision d-watch">Watch only</span>';
       if (d.status === 'error') return `<span class="decision d-skip" title="${esc(d.reason)}">Check failed</span>`;
-      return `<span class="decision d-skip" title="${esc(d.reason)}">Skip · ${esc(d.reason)}</span>`;
+      return skipBadge(d.reason);
     })
     .join(' ');
 }
@@ -3213,7 +3333,7 @@ function renderLiveSignals() {
 /** When a trade was copied, only show the follows that skipped it (the "Copied" chip says the rest). */
 function decisionSkipsOnly(sig) {
   const bad = (sig.copies || []).filter((c) => !c.ok);
-  return bad.map((c) => `<span class="decision d-skip" title="${esc(c.reason || '')}">Skip · ${esc(c.reason || c.status || 'not copied')}</span>`).join(' ');
+  return bad.map((c) => skipBadge(c.reason || c.status)).join(' ');
 }
 
 window.copyText = async function copyText(text, msg = 'Copied.') {
@@ -3369,6 +3489,14 @@ window.goTerminalTab = function goTerminalTab(tab) {
 // ---------------------------------------------------------------------------
 // Skips that are the bot doing its job — used only to keep those out of popups
 const NORMAL_SKIP_RE = /manages exits itself|doesn't copy sells|nothing tracked to sell|below your minimum|watched manually|your account is paused|already holding|cooldown|price moved too far|top-ups not copied/i;
+
+/** A "not copied" badge: expected skips (rules doing their job) are neutral; real problems stay yellow. */
+function skipBadge(reason) {
+  const r = String(reason || 'not copied');
+  const friendly = /nothing tracked to sell/i.test(r) ? "Not held — we never bought this coin" : /top-ups not copied/i.test(r) ? 'Top-up — one copy per trader position' : null;
+  const normal = NORMAL_SKIP_RE.test(r) || /pump-only is on|launchpad-only/i.test(r);
+  return `<span class="decision d-skip${normal ? ' is-normal' : ''}" title="${esc(r)}">${normal ? '' : 'Skip · '}${esc(friendly || r)}</span>`;
+}
 let lastPing = { ms: null, ok: false, source: 'rpc' };
 let serverHealth = null; // { checks: [...], checkedAt }
 let healthUnavailable = false;
@@ -3851,6 +3979,7 @@ window.openSettingsSection = function openSettingsSection(key) {
   if (key === 'security') loadSecurity();
   if (key === 'profile' || key === 'notifications' || key === 'security') fillUiForms();
   if (key === 'trading' && typeof populateSettingsInputs === 'function') populateSettingsInputs();
+  if (key === 'integrations') loadIntegrations();
   if (typeof syncUrl === 'function') syncUrl();
 };
 
@@ -5444,3 +5573,215 @@ async function sendSolFromMetaMask() {
     if (btn) btn.disabled = false;
   }
 }
+
+
+// ---------------------------------------------------------------------------
+// Trader settings (edit an existing follow: mode, sizing, TP/SL, limits, pump-only)
+// ---------------------------------------------------------------------------
+window.onEditFollowSizing = function onEditFollowSizing() {
+  const t = document.getElementById('ef-sizing-type').value;
+  document.getElementById('ef-sizing-label').textContent = t === 'percent' ? '% of balance' : t === 'proportional' ? 'Max per copy ($)' : 'Amount ($)';
+};
+
+window.onEditFollowMode = function onEditFollowMode() {
+  const id = document.getElementById('ef-id').value;
+  const f = engineState?.follows?.find((x) => x.id === id);
+  const mode = document.getElementById('ef-mode').value;
+  const on = Object.values(f?.exitRules || {}).filter((r) => r && r.enabled).length;
+  const hint = document.getElementById('ef-mode-hint');
+  hint.className = 'ef-hint';
+  if (mode === 'auto-exit') hint.textContent = on ? `Your ${on} exit rule${on === 1 ? '' : 's'} decide when to sell; the trader's sells are not copied.` : 'No exit rules are on yet — the recommended 5 rules will be switched on when you save.';
+  else if (mode === 'mirror') {
+    hint.textContent = "Sells only when the trader sells. If they never sell (or a big sell crashes the price first), nothing protects you — set a stop loss.";
+    hint.className = 'ef-hint is-warn';
+  } else hint.textContent = 'Holds until your take profit or stop loss is hit.';
+};
+
+window.openEditFollowModal = function openEditFollowModal(id) {
+  const f = engineState?.follows?.find((x) => x.id === id);
+  if (!f) return;
+  const set = (k, v) => {
+    const el = document.getElementById(k);
+    if (el) el.value = v === null || v === undefined ? '' : v;
+  };
+  set('ef-id', f.id);
+  document.getElementById('ef-who').textContent = `${f.traderWallet.slice(0, 4)}…${f.traderWallet.slice(-4)}`;
+  set('ef-name', f.name || '');
+  set('ef-mode', f.mode);
+  set('ef-sizing-type', f.sizing?.type || 'fixed');
+  set('ef-sizing-amount', f.sizing?.amount ?? 50);
+  set('ef-tp', f.tpPct);
+  set('ef-sl', f.slPct);
+  set('ef-min-trade', f.minTradeUsd);
+  set('ef-max-open', f.maxOpenPositions);
+  set('ef-max-risk', f.maxAtRiskUsd);
+  const po = f.filtersOverride?.pumpOnly;
+  set('ef-pump', po === true ? 'true' : po === false ? 'false' : '');
+  const on = Object.values(f.exitRules || {}).filter((r) => r && r.enabled).length;
+  document.getElementById('ef-rules-count').textContent = `${on}/5`;
+  document.getElementById('ef-msg').textContent = '';
+  onEditFollowSizing();
+  onEditFollowMode();
+  document.getElementById('modal-edit-follow').classList.add('open');
+};
+
+window.openExitRulesFromEdit = function openExitRulesFromEdit() {
+  const id = document.getElementById('ef-id').value;
+  closeModal('modal-edit-follow');
+  openExitRulesModal(id);
+};
+
+window.saveEditFollow = async function saveEditFollow() {
+  const id = document.getElementById('ef-id').value;
+  const val = (k) => document.getElementById(k).value.trim();
+  const num = (k) => (val(k) === '' ? null : Number(val(k)));
+  const msg = document.getElementById('ef-msg');
+  const amount = Number(val('ef-sizing-amount'));
+  const type = val('ef-sizing-type');
+  if (!(amount > 0) || (type === 'percent' && amount > 100)) {
+    msg.textContent = type === 'percent' ? '% of balance must be between 0 and 100.' : 'Size must be greater than zero.';
+    return;
+  }
+  const sl = num('ef-sl');
+  if (sl !== null && !(sl > 0 && sl <= 100)) {
+    msg.textContent = 'Stop loss must be between 1 and 100%.';
+    return;
+  }
+  const pump = val('ef-pump');
+  const body = {
+    name: val('ef-name') || '-',
+    mode: val('ef-mode'),
+    sizing: { type, amount },
+    tpPct: num('ef-tp'),
+    slPct: sl,
+    minTradeUsd: num('ef-min-trade'),
+    maxOpenPositions: num('ef-max-open'),
+    maxAtRiskUsd: num('ef-max-risk'),
+    filtersOverride: { pumpOnly: pump === '' ? null : pump === 'true' },
+  };
+  const btn = document.getElementById('ef-save');
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/follows/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const data = await res.json();
+    if (!data.ok) {
+      msg.textContent = data.error || 'Could not save.';
+      return;
+    }
+    engineState = data.state;
+    renderTerminalAll();
+    closeModal('modal-edit-follow');
+    showToast('Trader settings saved', 'good');
+  } catch {
+    msg.textContent = 'Could not reach the server.';
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+
+// ---------------------------------------------------------------------------
+// Integrations (Settings → Integrations): Telegram + Discord trade alerts
+// ---------------------------------------------------------------------------
+const INTG = { telegram: { short: 'tg', name: 'Telegram' }, discord: { short: 'dc', name: 'Discord' } };
+const INTG_EVENTS = [['copies', 'Copied buys'], ['sells', 'Sells & PnL'], ['problems', 'Problems']];
+let intgState = null;
+
+function intgMsg(app, text, kind = '') {
+  const el = document.getElementById(`intg-${INTG[app].short}-msg`);
+  if (el) {
+    el.className = `intg-msg${kind ? ` is-${kind}` : ''}`;
+    el.textContent = text || '';
+  }
+}
+
+function renderIntegrations() {
+  if (!intgState) return;
+  for (const app of Object.keys(INTG)) {
+    const c = intgState[app] || {};
+    const k = INTG[app].short;
+    const pill = document.getElementById(`intg-${k}-pill`);
+    if (pill) {
+      const live = c.enabled && c.configured;
+      pill.className = `intg-pill${live ? ' is-on' : c.lastError ? ' is-bad' : ''}`;
+      pill.textContent = live ? 'Connected' : c.configured ? 'Paused' : 'Not connected';
+    }
+    const en = document.getElementById(`intg-${k}-enabled`);
+    if (en) {
+      en.checked = Boolean(c.enabled);
+      en.disabled = !c.configured;
+    }
+    if (app === 'telegram') {
+      const tok = document.getElementById('intg-tg-token');
+      if (tok && !tok.value) tok.placeholder = c.tokenMasked ? `Saved: ${c.tokenMasked}` : 'Bot token, e.g. 123456789:AAH…';
+      const chat = document.getElementById('intg-tg-chat');
+      if (chat && document.activeElement !== chat) chat.value = c.chatId || '';
+    } else {
+      const hook = document.getElementById('intg-dc-hook');
+      if (hook && !hook.value) hook.placeholder = c.hookMasked ? `Saved: ${c.hookMasked}` : 'https://discord.com/api/webhooks/…';
+    }
+    const ev = document.querySelector(`.intg-events[data-app="${app}"]`);
+    if (ev) {
+      ev.innerHTML = INTG_EVENTS.map(([key, label]) => `<label class="intg-ev"><input type="checkbox" ${c.events?.[key] !== false ? 'checked' : ''} onchange="intgEvent('${app}', '${key}', this.checked)" /> ${label}</label>`).join('');
+    }
+    if (c.lastError && !document.getElementById(`intg-${k}-msg`)?.textContent) intgMsg(app, `Last send failed: ${c.lastError.error}`, 'bad');
+  }
+}
+
+window.loadIntegrations = async function loadIntegrations() {
+  try {
+    intgState = await (await fetch('/api/integrations')).json();
+    renderIntegrations();
+  } catch {
+    // offline
+  }
+};
+
+async function intgPost(app, sub, body) {
+  const res = await fetch(`/api/integrations/${app}${sub ? `/${sub}` : ''}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const data = await res.json();
+  if (data.telegram) intgState = { telegram: data.telegram, discord: data.discord };
+  renderIntegrations();
+  return data;
+}
+
+window.intgFindTelegramChat = async function intgFindTelegramChat() {
+  const token = document.getElementById('intg-tg-token').value.trim();
+  intgMsg('telegram', 'Looking for your chat…');
+  const d = await intgPost('telegram', 'find-chat', token ? { botToken: token } : {});
+  if (!d.ok) return intgMsg('telegram', d.error, 'bad');
+  document.getElementById('intg-tg-token').value = '';
+  document.getElementById('intg-tg-chat').value = d.chatId;
+  const t = await intgPost('telegram', '', { enabled: true });
+  intgMsg('telegram', t.ok ? `Found "${d.name}" — alerts are on. Press Send test to check.` : t.error, t.ok ? 'good' : 'bad');
+};
+
+window.intgSave = async function intgSave(app) {
+  const body = app === 'telegram' ? { botToken: document.getElementById('intg-tg-token').value.trim(), chatId: document.getElementById('intg-tg-chat').value.trim(), enabled: true } : { webhookUrl: document.getElementById('intg-dc-hook').value.trim(), enabled: true };
+  const d = await intgPost(app, '', body);
+  if (!d.ok) return intgMsg(app, d.error, 'bad');
+  if (app === 'telegram') document.getElementById('intg-tg-token').value = '';
+  else document.getElementById('intg-dc-hook').value = '';
+  const c = d[app];
+  intgMsg(app, c.configured ? 'Saved — alerts are on. Press Send test to check.' : app === 'telegram' ? 'Saved. Add the chat ID (or press Find my chat) to finish.' : 'Saved.', c.configured ? 'good' : '');
+};
+
+window.intgToggle = async function intgToggle(app, on) {
+  const d = await intgPost(app, '', { enabled: on });
+  intgMsg(app, d.ok ? (on ? 'Alerts on.' : 'Alerts paused.') : d.error, d.ok ? '' : 'bad');
+};
+
+window.intgEvent = async function intgEvent(app, key, on) {
+  await intgPost(app, '', { events: { [key]: on } });
+};
+
+window.intgTest = async function intgTest(app) {
+  intgMsg(app, 'Sending…');
+  const d = await intgPost(app, 'test');
+  intgMsg(app, d.ok ? `Test sent — check ${INTG[app].name}.` : d.error, d.ok ? 'good' : 'bad');
+};
+
+window.intgDisconnect = async function intgDisconnect(app) {
+  const d = await intgPost(app, 'disconnect');
+  intgMsg(app, d.ok ? `${INTG[app].name} disconnected.` : d.error, d.ok ? '' : 'bad');
+};

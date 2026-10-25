@@ -97,6 +97,19 @@ function closedSol(p, boughtUsd, soldUsd) {
   };
 }
 
+/** Settings safe to send to the browser: integration secrets removed. */
+export function publicSettings(settings) {
+  if (!settings?.integrations) return settings;
+  const { telegram = {}, discord = {} } = settings.integrations;
+  return {
+    ...settings,
+    integrations: {
+      telegram: { enabled: Boolean(telegram.enabled), chatId: telegram.chatId || '', hasToken: Boolean(telegram.botToken), events: telegram.events || {} },
+      discord: { enabled: Boolean(discord.enabled), hasWebhook: Boolean(discord.webhookUrl), events: discord.events || {} },
+    },
+  };
+}
+
 export class CopyTradingEngine {
   constructor(options = {}) {
     this.adapter = options.adapter || new ChainExecutionAdapter();
@@ -461,6 +474,7 @@ export class CopyTradingEngine {
 
     const maxAge = follow.chainId === 'solana' ? Number(this.settings.maxSignalAgeSec ?? 90) : 30;
     if (signal.ageSec && signal.ageSec > maxAge) {
+      if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
       return this.recordSkip({ dryRun, follow, wallet, signal, reason: `trade is too old to copy (${Math.round(signal.ageSec)}s)` });
     }
 
@@ -477,6 +491,11 @@ export class CopyTradingEngine {
     // Top-up of a coin we already copied in this trader position (they haven't fully sold yet)
     if (!this.settings.copyTopUps && token.address && this.copiedCycleActive(follow.id, token.address)) {
       return this.recordSkip({ dryRun, follow, wallet, signal, reason: 'trader is adding to a coin already copied (top-ups not copied)' });
+    }
+    // The trader's first buy of this coin was missed (price had run / seen too late): their later
+    // buys of the same position come even later, so they are not copied as a fresh entry either
+    if (!this.settings.copyTopUps && token.address && this.copiedCycleActive(follow.id, token.address, 'missed')) {
+      return this.recordSkip({ dryRun, follow, wallet, signal, reason: "trader's first buy was too late to copy — their top-ups are skipped too (top-ups not copied)" });
     }
 
     if (traderBuyUsd < follow.minTradeUsd) {
@@ -687,6 +706,7 @@ export class CopyTradingEngine {
       traderFillPrice > 0 ? ((quote.quotedPriceUsd - traderFillPrice) / traderFillPrice) * 100 : 0;
 
     if (traderFillPrice > 0 && chaseGapPct > this.settings.maxChasePct) {
+      if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
       return this.recordSkip({
         dryRun,
         follow,
@@ -1831,25 +1851,29 @@ export class CopyTradingEngine {
    * Trader positions we have copied (follow + coin), so top-ups aren't copied as new positions.
    * Ends when the trader sells 100%, or after 2 h (in case their sell was never seen).
    */
-  copiedCycleActive(followId, mint) {
-    const c = this.copiedCycles?.[`${followId}:${mint}`];
+  // kind '' = we copied this trader position; 'missed' = their entry came too late to copy
+  copiedCycleActive(followId, mint, kind = '') {
+    const k = `${followId}:${mint}${kind ? `:${kind}` : ''}`;
+    const c = this.copiedCycles?.[k];
     if (!c) return false;
     if (Date.now() - c > 2 * 3600_000) {
-      delete this.copiedCycles[`${followId}:${mint}`];
+      delete this.copiedCycles[k];
       return false;
     }
     return true;
   }
 
-  markCopiedCycle(followId, mint) {
+  markCopiedCycle(followId, mint, kind = '') {
     if (!mint) return;
     if (!this.copiedCycles) this.copiedCycles = {};
-    const k = `${followId}:${mint}`;
+    const k = `${followId}:${mint}${kind ? `:${kind}` : ''}`;
     if (!this.copiedCycles[k]) this.copiedCycles[k] = Date.now();
   }
 
   endCopiedCycle(followId, mint) {
-    if (this.copiedCycles) delete this.copiedCycles[`${followId}:${mint}`];
+    if (!this.copiedCycles) return;
+    delete this.copiedCycles[`${followId}:${mint}`];
+    delete this.copiedCycles[`${followId}:${mint}:missed`];
   }
 
   /**
@@ -1996,7 +2020,8 @@ export class CopyTradingEngine {
       chains: CHAINS,
       wallets: this.wallets,
       activeWalletId: this.getActiveWallet()?.id,
-      settings: this.settings,
+      // integration secrets (Telegram bot token, Discord webhook) never leave the server
+      settings: publicSettings(this.settings),
       follows: this.follows,
       traderScores: Object.fromEntries(this.follows.map((f) => [f.id, { ...this.traderScorecard(f.id), sinceResume: f.scoreSince ? this.traderScorecard(f.id, { since: f.scoreSince }) : null }])),
       positions: enrichedPositions,

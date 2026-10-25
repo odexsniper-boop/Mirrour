@@ -17,6 +17,7 @@ import { SupabaseMirror, SUPABASE_TABLE_SQL, isSupabaseUrl } from './engine/supa
 import fsSync from 'node:fs';
 import zlib from 'node:zlib';
 import { RealTrader } from './engine/realTrader.mjs';
+import { Notifier } from './engine/notifier.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -115,6 +116,11 @@ export const realTrader = new RealTrader({
   },
 });
 engine.adapter.liveHooks = realTrader.hooks();
+
+// App integrations (Telegram, Discord): trade alerts pushed to your phone / channel
+export const notifier = new Notifier({ engine, redact: (x) => redact(String(x), alchemy.apiKey) });
+engine.onUpdate((evt) => notifier.handleEngineEvent(evt));
+setInterval(() => notifier.scanAlerts(), 4000).unref?.();
 // On a public deploy, real trading needs a site password (otherwise anyone with the link could trade)
 const realBlockedReason = ON_RAILWAY && !SITE_PASSWORD ? 'public deploy without ODEX_PASSWORD: real trading is disabled' : null;
 // One bot at a time: when another copy of Odex Mirror (PC or Railway) is running on the same
@@ -181,7 +187,7 @@ engine.onUpdate((evt) => {
   }
   broadcastRaw({
     event: evt.type,
-    data: evt.payload,
+    data: evt.type === 'settings_updated' ? null : evt.payload, // never broadcast raw settings (secrets)
     state: snap,
   });
   if (evt.type === 'follows_updated' || evt.type === 'state_reset') {
@@ -548,6 +554,33 @@ export const server = http.createServer(async (req, res) => {
       }
     }
 
+    // App integrations: Telegram + Discord trade alerts (secrets stay on the server)
+    if (pathname === '/api/integrations' && req.method === 'GET') {
+      return sendJson(res, 200, { ok: true, ...notifier.publicConfig() });
+    }
+    if (pathname.startsWith('/api/integrations/') && req.method === 'POST') {
+      const [, , , app, sub] = pathname.split('/');
+      if (!['telegram', 'discord'].includes(app)) return sendJson(res, 404, { ok: false, error: 'Unknown app.' });
+      const body = await readJsonBody(req);
+      try {
+        let extra = {};
+        if (sub === 'test') await notifier.test(app);
+        else if (sub === 'disconnect') notifier.disconnect(app);
+        else if (sub === 'find-chat' && app === 'telegram') {
+          if (body.botToken) notifier.updateTelegram({ botToken: body.botToken });
+          extra = await notifier.findTelegramChat();
+          notifier.updateTelegram({ chatId: extra.chatId });
+        } else if (!sub) {
+          if (app === 'telegram') notifier.updateTelegram(body);
+          else notifier.updateDiscord(body);
+        } else return sendJson(res, 404, { ok: false, error: 'Unknown action.' });
+        engine.emit('settings_updated', {}); // saves (database + Supabase)
+        return sendJson(res, 200, { ok: true, ...extra, ...notifier.publicConfig() });
+      } catch (err) {
+        return sendJson(res, 400, { ok: false, error: err.message, ...notifier.publicConfig() });
+      }
+    }
+
     // Real trading: status (never includes the key) and a safe self-test that sends nothing
     if (req.method === 'GET' && pathname === '/api/real/status') {
       if (engine.realTradingActive()) await refreshRealBalance();
@@ -897,7 +930,7 @@ export const server = http.createServer(async (req, res) => {
           engine.settings.risk = { ...engine.settings.risk, ...body.risk };
         }
       }
-      engine.emit('settings_updated', engine.settings);
+      engine.emit('settings_updated', {});
       return sendJson(res, 200, { ok: true, state: engine.getStateSnapshot() });
     }
 
