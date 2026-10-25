@@ -56,6 +56,7 @@ export class LiveSignalService {
         ...(heliusKey
           ? {
               streamUrl: `wss://mainnet.helius-rpc.com/?api-key=${heliusKey}`,
+              tokenStreamUrl: `wss://mainnet.helius-rpc.com/?api-key=${heliusKey}`,
               balanceWsUrl: env.SOLANA_BALANCE_WS_URL || `wss://mainnet.helius-rpc.com/?api-key=${heliusKey}`,
             }
           : {}),

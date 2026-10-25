@@ -10,6 +10,7 @@
  */
 
 import { WalletStream, looksLikeSwap, toWsUrl } from './walletStream.mjs';
+import { TokenAccountStream } from './tokenStream.mjs';
 import { bondingCurvePda } from './pumpCurve.mjs';
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 export const QUOTE_MINTS = {
@@ -415,6 +416,7 @@ export class SolanaWalletWatcher {
     WebSocketImpl = globalThis.WebSocket,
     balanceWsUrl = process.env.SOLANA_BALANCE_WS_URL || 'wss://api.mainnet-beta.solana.com',
     streamUrl = null, // live push connection; default: the RPC URL as wss
+    tokenStreamUrl = null, // token-account push (Helius): spam-proof, fastest buy/sell detection
     redactUrl = (x) => x,
   } = {}) {
     this.rpcUrl = rpcUrl;
@@ -472,6 +474,12 @@ export class SolanaWalletWatcher {
       onAccount: (address, ev) => this.handleStreamAccount(address, ev),
       onChange: () => this.emitStatus(),
     });
+    // Fastest path: the wallets' token accounts (spam never touches them). Runs next to the
+    // other feeds; every path shares one "seen signature" set, so a trade is handled once.
+    this.tokenStats = { events: 0, signals: 0, lagMs: [] };
+    this.tokenStream = tokenStreamUrl
+      ? new TokenAccountStream({ url: tokenStreamUrl, WebSocketImpl, redactUrl, onChange: (ev) => this.handleTokenChange(ev), onStatus: () => this.emitStatus() })
+      : null;
     this.running = false;
     this.polling = false;
     this.backoffMs = 0;
@@ -549,6 +557,51 @@ export class SolanaWalletWatcher {
     }
     if (on) this.stream.start();
     else this.stream.stop();
+    if (this.tokenStream) {
+      this.tokenStream.setWallets(all);
+      if (on && all.length) this.tokenStream.start();
+      else this.tokenStream.stop();
+    }
+  }
+
+  /**
+   * A watched wallet's token account changed (a real buy or sell — spam can't do this): read that
+   * account's newest transaction (it has very few) and handle it at once.
+   */
+  async handleTokenChange(ev) {
+    const w = this.wallets.get(ev.wallet);
+    if (!w) return;
+    this.tokenStats.events += 1;
+    const since = Date.now() - 120_000; // only fresh trades (never replay old history)
+    for (let attempt = 0; attempt < 4; attempt++) {
+      let list = [];
+      try {
+        list = (await this.rpc('getSignaturesForAddress', [ev.tokenAccount, { limit: 5, commitment: 'confirmed' }])) || [];
+      } catch {
+        list = [];
+      }
+      const fresh = list.filter((x) => !x.err && (!x.blockTime || x.blockTime * 1000 >= since) && !this.seenSigs.has(x.signature));
+      if (fresh.length) {
+        // oldest first, so a buy and an immediate sell keep their order
+        for (const x of fresh.reverse()) {
+          try {
+            const sig = await this.processSignature(w, x.signature, { backfill: false, via: 'token-stream', receivedAt: ev.receivedAt, waitForTx: true });
+            if (sig) {
+              this.tokenStats.signals += 1;
+              if (ev.receivedAt) {
+                this.tokenStats.lagMs.push(Date.now() - ev.receivedAt);
+                if (this.tokenStats.lagMs.length > 50) this.tokenStats.lagMs.shift();
+              }
+            }
+          } catch {
+            this.seenSigs.delete(x.signature); // let another path pick it up
+          }
+        }
+        return;
+      }
+      // the account's history can trail the push by a moment
+      await new Promise((r) => setTimeout(r, 250 + attempt * 250));
+    }
   }
 
   setStreamEnabled(on) {
@@ -667,6 +720,7 @@ export class SolanaWalletWatcher {
         balanceMoves: this.streamStats.balanceMoves || 0,
         blocksRead: this.streamStats.blocksRead || 0,
         balanceFeed: this.useBalanceStream ? { ...this.balanceStream.status(), url: this.balanceStream.url } : null,
+        tokenFeed: this.tokenStream ? { ...this.tokenStream.status(), changes: this.tokenStats.events, signals: this.tokenStats.signals, avgProcessMs: this.tokenStats.lagMs.length ? Math.round(this.tokenStats.lagMs.reduce((a, b) => a + b, 0) / this.tokenStats.lagMs.length) : null } : null,
         avgProcessMs: lag.length ? Math.round(lag.reduce((a, b) => a + b, 0) / lag.length) : null,
       },
       wallets: [...this.wallets.values()].map((w) => ({
@@ -1460,6 +1514,7 @@ export class SolanaWalletWatcher {
     this.status.nextPollInMs = null;
     this.stream.stop();
     this.balanceStream.stop();
+    this.tokenStream?.stop();
     this.emitStatus();
   }
 }
