@@ -579,7 +579,7 @@ window.openUserProfileModal = function openUserProfileModal() {
 window.copyActiveWalletAddress = function copyActiveWalletAddress() {
   const wallets = engineState?.wallets?.filter((w) => !w.archived) || [];
   const activeWallet = wallets.find((w) => w.active) || wallets[0];
-  const addr = activeWallet?.solanaAddress;
+  const addr = botWalletBalance()?.address || walletChainAddress(activeWallet);
   if (!isRealSolanaAddress(addr)) {
     showToast('This paper wallet has no on-chain address to copy', 'warn');
     return;
@@ -1005,7 +1005,7 @@ function renderKpiStrip() {
   const chains = engineState.chains;
 
   // Real balance = what the wallet's Solana address actually holds on-chain (never an internal number)
-  const onChain = balanceFor(activeWallet);
+  const onChain = botWalletBalance() || balanceFor(activeWallet);
   const totalPortfolioUsd = onChain ? onChain.usd : 0;
   const activeWalletUsd = totalPortfolioUsd;
   void chains;
@@ -1028,11 +1028,11 @@ function renderKpiStrip() {
     if (hasDateFilter) {
       const S = currentPnlSummary();
       const periodRealized = S ? S.realized : 0;
-      actWalletSubEl.textContent = `${activeWallet.name} · ${filterLabel}: ${signedUsd(periodRealized)} realized`;
+      actWalletSubEl.textContent = `${!paperMode && onChain?.bot ? 'Bot wallet' : activeWallet.name} · ${filterLabel}: ${signedUsd(periodRealized)} realized`;
     } else {
       actWalletSubEl.textContent = paperMode
         ? `Paper balance · ${formatUsd(paperCash)} cash`
-        : onChain ? `On-chain · ${onChain.sol.toFixed(3)} SOL · ${onChain.usdc.toFixed(2)} USDC` : 'Link Phantom or add your address to see your real balance';
+        : onChain ? `${onChain.bot ? 'Bot wallet' : 'On-chain'} · ${onChain.sol.toFixed(3)} SOL · ${onChain.usdc.toFixed(2)} USDC` : 'Link Phantom or add your address to see your real balance';
     }
   }
 
@@ -1155,8 +1155,9 @@ function renderKpiStrip() {
   }
 
   const hwdNameEl = document.getElementById('hwd-wallet-name');
-  if (hwdNameEl) hwdNameEl.textContent = activeWallet.name === 'Main' ? 'Solana Wallet' : activeWallet.name;
-  const hwdAddr = walletChainAddress(activeWallet);
+  const botBal = botWalletBalance();
+  if (hwdNameEl) hwdNameEl.textContent = botBal ? 'Bot Wallet' : activeWallet.name === 'Main' ? 'Solana Wallet' : activeWallet.name;
+  const hwdAddr = botBal?.address || walletChainAddress(activeWallet);
   const hwdAddrEl = document.getElementById('hwd-wallet-addr');
   if (hwdAddrEl) {
     hwdAddrEl.textContent = hwdAddr ? `${hwdAddr.slice(0, 4)}…${hwdAddr.slice(-4)}` : 'No address linked';
@@ -1524,6 +1525,7 @@ async function loadBotCardStatus(force = false) {
   botCardLoading = true;
   try {
     botCardStatus = await (await fetch('/api/real/status')).json();
+    window.__botStatus = botCardStatus;
   } catch {
     botCardStatus = botCardStatus || { error: true };
   } finally {
@@ -1531,7 +1533,21 @@ async function loadBotCardStatus(force = false) {
     botCardLoading = false;
   }
   renderBotWalletCard(true);
+  // real mode: the top cards and header show this balance
+  if (engineState?.settings?.paperTrading === false) {
+    try {
+      renderBalancesEverywhereLite();
+      renderKpiStrip();
+    } catch {
+      // page still loading
+    }
+  }
 }
+// Real mode: keep the bot wallet balance fresh everywhere (every 20 s), whichever tab is open
+setInterval(() => {
+  if (engineState?.settings?.paperTrading === false && document.visibilityState !== 'hidden') loadBotCardStatus(true);
+}, 20_000);
+window.addEventListener('DOMContentLoaded', () => setTimeout(() => loadBotCardStatus(true), 1500));
 
 function renderBotWalletCard(fromLoad = false) {
   const el = document.getElementById('bot-wallet-card');
@@ -4121,6 +4137,20 @@ async function refreshChainBalance(force = false) {
   renderBalancesEverywhere();
 }
 
+/**
+ * Real mode (Paper Trading OFF + bot wallet set up): the money that trades is the bot wallet, so the
+ * dashboard balances show it. null in paper mode or before the bot wallet status has loaded.
+ */
+function botWalletBalance() {
+  if (engineState?.settings?.paperTrading !== false) return null;
+  const s = window.__botStatus;
+  if (!s?.configured || !s.balance) return null;
+  const px = engineState?.chains?.solana?.nativePriceUsd || 0;
+  const sol = Number(s.balance.sol) || 0;
+  const usdc = Number(s.balance.usdc) || 0;
+  return { sol, usdc, usd: sol * px + usdc, address: s.address, bot: true };
+}
+
 /** Balance for a wallet card: only the address we actually read on-chain. */
 function balanceFor(w) {
   const addr = walletChainAddress(w);
@@ -4128,8 +4158,13 @@ function balanceFor(w) {
   return null;
 }
 
+let lastPaperModeSeen = null;
 function renderBalancesEverywhereLite() {
-  const b = balanceFor(activeWalletObj());
+  // switching Paper Trading on/off changes which wallet the balances show: refresh the bot status now
+  const paperNow = engineState?.settings?.paperTrading !== false;
+  if (lastPaperModeSeen !== null && lastPaperModeSeen !== paperNow && typeof loadBotCardStatus === 'function') loadBotCardStatus(true);
+  lastPaperModeSeen = paperNow;
+  const b = botWalletBalance() || balanceFor(activeWalletObj());
   const pill = document.getElementById('header-sol-balance');
   if (pill) pill.textContent = b ? `${b.sol.toFixed(b.sol >= 100 ? 1 : 3)} SOL` : walletChainAddress() ? '… SOL' : '0.00 SOL';
   const usdcEl = document.getElementById('hwd-usdc-bal');
