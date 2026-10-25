@@ -551,7 +551,7 @@ export const server = http.createServer(async (req, res) => {
     // Real trading: status (never includes the key) and a safe self-test that sends nothing
     if (req.method === 'GET' && pathname === '/api/real/status') {
       if (engine.realTradingActive()) await refreshRealBalance();
-      return sendJson(res, 200, { ok: true, active: engine.realTradingActive(), paperTrading: engine.settings.paperTrading, solPriceLive, ...realTrader.status() });
+      return sendJson(res, 200, { ok: true, active: engine.realTradingActive(), paperTrading: engine.settings.paperTrading, solPriceLive, blocked: realBlockedReason || (otherInstance ? `another copy of Odex Mirror is running (${otherInstance.host}) — stop it to trade here` : null), onRailway: ON_RAILWAY, ...realTrader.status() });
     }
     if (req.method === 'POST' && pathname === '/api/real/test') {
       const r = await realTrader.selfTest();

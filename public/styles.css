@@ -6621,3 +6621,53 @@ body, button, input, select, textarea, .kpi-label, .card-title, .term-tab {
 .trend-circle.is-down { background: rgba(251, 113, 133, 0.16); color: #fb7185; box-shadow: inset 0 0 0 1px rgba(251, 113, 133, 0.35); }
 .trend-circle.is-up { background: #34d399 !important; color: #0b0c10 !important; box-shadow: none !important; }
 .trend-circle.is-down { background: #fb7185 !important; color: #0b0c10 !important; box-shadow: none !important; }
+
+/* ===== Bot wallet card (Wallets section) ===== */
+#bot-wallet-card .bot-wallet { margin-bottom: 14px; border: 1px solid rgba(255,255,255,0.08); }
+.bw-logo { color: #fff; }
+.bw-tag { font-size: 10.5px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,0.08); color: #d4d4d8; vertical-align: middle; }
+.bw-pill { display: inline-flex; align-items: center; gap: 5px; font-size: 10.5px; font-weight: 500; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,0.06); color: var(--text-mute, #8b8d97); vertical-align: middle; }
+.bw-pill.is-live { background: rgba(52,211,153,0.14); color: #34d399; }
+.bw-pill.is-live .dot { width: 6px; height: 6px; border-radius: 50%; background: #34d399; }
+.bw-pill.is-ready { background: rgba(255,255,255,0.1); color: #fff; }
+.bw-pill.is-bad { background: rgba(251,113,133,0.14); color: #fb7185; }
+.bw-limits { margin-top: 8px; font-size: 11.5px; color: var(--text-mute, #8b8d97); }
+.bw-note { margin-top: 6px; font-size: 12px; line-height: 1.5; color: var(--text-mute, #8b8d97); max-width: 560px; }
+.bw-note code { font-size: 11px; padding: 1px 5px; border-radius: 5px; background: rgba(255,255,255,0.06); color: #e4e4e7; }
+.bw-warn { color: #fbbf24; }
+
+/* ===== Bot wallet: purple glowing border (same style as open position cards) ===== */
+#bot-wallet-card .sol-wallet.bot-wallet {
+  --bw: 139, 92, 246;      /* purple */
+  --bw-2: 109, 117, 245;   /* indigo at the top-right */
+  position: relative;
+  border-radius: 22px !important;
+  border: 1px solid rgba(var(--bw), 0.40) !important;
+  background:
+    radial-gradient(120% 140% at 0% 50%, rgba(var(--bw), 0.09), transparent 55%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent),
+    var(--card-sub) !important;
+  box-shadow:
+    0 0 0 1px rgba(var(--bw), 0.12),
+    0 0 26px -4px rgba(var(--bw), 0.50),
+    inset 0 0 28px rgba(var(--bw), 0.06) !important;
+  transition: box-shadow 0.25s ease, border-color 0.25s ease;
+}
+#bot-wallet-card .sol-wallet.bot-wallet:hover {
+  box-shadow:
+    0 0 0 1px rgba(var(--bw), 0.20),
+    0 0 34px -2px rgba(var(--bw), 0.60),
+    inset 0 0 32px rgba(var(--bw), 0.08) !important;
+}
+#bot-wallet-card .sol-wallet.bot-wallet::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: linear-gradient(200deg, rgba(var(--bw-2), 0.55) 0%, rgba(var(--bw), 0.85) 38%, rgba(var(--bw), 0.95) 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+}

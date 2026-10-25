@@ -1510,8 +1510,112 @@ function renderWalletsList() {
       `;
     })
     .join(''));
-
+  renderBotWalletCard();
 }
+
+// ---------------------------------------------------------------------------
+// Bot wallet card (Wallets section): the wallet real trades spend from (ODEX_TRADER_KEY)
+// ---------------------------------------------------------------------------
+let botCardStatus = null; // last /api/real/status
+let botCardLoadedAt = 0;
+let botCardLoading = false;
+async function loadBotCardStatus(force = false) {
+  if (botCardLoading || (!force && Date.now() - botCardLoadedAt < 20_000)) return;
+  botCardLoading = true;
+  try {
+    botCardStatus = await (await fetch('/api/real/status')).json();
+  } catch {
+    botCardStatus = botCardStatus || { error: true };
+  } finally {
+    botCardLoadedAt = Date.now();
+    botCardLoading = false;
+  }
+  renderBotWalletCard(true);
+}
+
+function renderBotWalletCard(fromLoad = false) {
+  const el = document.getElementById('bot-wallet-card');
+  if (!el) return;
+  if (!fromLoad) loadBotCardStatus();
+  const s = botCardStatus;
+  if (!s) {
+    el.innerHTML = '<div class="sol-wallet bot-wallet"><div class="sw-muted">Loading bot wallet…</div></div>';
+    return;
+  }
+  const solPx = engineState?.chains?.solana?.nativePriceUsd || 0;
+  let pill;
+  let note;
+  if (s.error) {
+    pill = '<span class="bw-pill is-bad">Unavailable</span>';
+    note = 'Could not load the bot wallet status.';
+  } else if (s.keyError) {
+    pill = '<span class="bw-pill is-bad">Key problem</span>';
+    note = esc(s.keyError);
+  } else if (!s.configured) {
+    pill = '<span class="bw-pill">Not set up</span>';
+    note = `Real trades spend from a separate bot wallet. Add its key as <code>ODEX_TRADER_KEY</code> in ${s.onRailway ? 'Railway → Variables' : '<code>.env</code>'} (plus <code>ODEX_PASSWORD</code> on Railway), then restart. Your bot wallet key is in <code>data/bot-wallet-KEEP-SECRET.txt</code> on your PC.`;
+  } else if (s.blocked) {
+    pill = '<span class="bw-pill is-bad">Blocked</span>';
+    note = `Real trading is off: ${esc(s.blocked)}.`;
+  } else if (s.active) {
+    pill = '<span class="bw-pill is-live"><span class="dot"></span>Live</span>';
+    note = `Paper Trading is OFF — copies spend real SOL from this wallet.${s.solPriceLive ? '' : ' Waiting for the live SOL price before ordering.'}`;
+  } else {
+    pill = '<span class="bw-pill is-ready">Ready</span>';
+    note = 'Real trading starts when you switch Paper Trading OFF.';
+  }
+  const addr = s.address || '';
+  const b = s.balance;
+  const caps = s.caps || {};
+  const spent = Number(s.spent24hSol || 0);
+  const lowFunds = b && b.sol < Number(caps.reserveSol || 0.02) + 0.05;
+  el.innerHTML = `
+    <div class="sol-wallet bot-wallet">
+      <div class="sw-top">
+        <div class="sw-id">
+          <span class="sw-logo bw-logo"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4"/><circle cx="12" cy="3" r="1"/><circle cx="9" cy="14" r="1.3" fill="currentColor"/><circle cx="15" cy="14" r="1.3" fill="currentColor"/><path d="M2 13v3M22 13v3"/></svg></span>
+          <div>
+            <div class="sw-name">Bot Wallet <span class="bw-tag">Real trading</span> ${pill}</div>
+            <div class="sw-addr mono">
+              ${addr ? `<span title="${esc(addr)}">${esc(addr.slice(0, 4))}…${esc(addr.slice(-4))}</span>
+              <button class="sw-copy" onclick="copyWalletAddress('${esc(addr)}')" title="Copy address" aria-label="Copy address"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>` : '<span class="sw-muted">No bot wallet key yet</span>'}
+            </div>
+          </div>
+        </div>
+        <div class="sw-top-right"><span class="sw-chain"><svg width="16" height="13" viewBox="0 0 397.7 311.7" aria-hidden="true"><use href="#sol-mark"/></svg>Solana</span></div>
+      </div>
+      <div class="sw-bottom">
+        <div class="sw-bal">
+          ${b
+            ? `<div><strong class="mono">${Number(b.sol).toFixed(3)}</strong> <span>SOL</span> <span class="sw-muted mono">· ${Number(b.usdc || 0).toFixed(2)} USDC</span></div>
+          <div class="sw-usd mono">≈ ${formatUsd(Number(b.sol) * solPx + Number(b.usdc || 0))} on-chain${lowFunds ? ' · <span class="bw-warn">add SOL to trade</span>' : ''}</div>`
+            : `<div><strong class="mono">—</strong> <span>SOL</span></div><div class="sw-usd mono">${addr ? 'Reading balance…' : 'Balance shows once the key is set'}</div>`}
+          ${s.configured ? `<div class="bw-limits mono">Max ${caps.maxSolPerTrade} SOL per buy · ${caps.maxSolPerDay > 0 ? `${spent.toFixed(3)} / ${caps.maxSolPerDay} SOL used today` : 'no daily cap'} · ${caps.reserveSol} SOL kept for fees</div>` : ''}
+          <div class="bw-note">${note}</div>
+        </div>
+        <div class="sw-actions">
+          ${addr ? `<button class="btn" onclick="openDepositModal('deposit')" title="Send SOL to the bot wallet from Phantom or MetaMask">Fund</button>
+          <a class="btn" href="https://solscan.io/account/${encodeURIComponent(addr)}" target="_blank" rel="noopener">Explorer</a>
+          <button class="btn btn-primary" id="bw-test-btn" onclick="botWalletSelfTest()" title="Checks the key and simulates a tiny swap — nothing is sent">Self-test</button>` : ''}
+        </div>
+      </div>
+    </div>`;
+}
+
+window.botWalletSelfTest = async function botWalletSelfTest() {
+  const btn = document.getElementById('bw-test-btn');
+  if (btn) btn.disabled = true;
+  showToast('Testing the bot wallet (nothing is sent)…', 'good');
+  try {
+    const r = await (await fetch('/api/real/test', { method: 'POST' })).json();
+    showToast(r.ok ? (r.warning ? `Key works — ${r.warning}` : 'Self-test passed: key signs correctly and a swap simulation succeeded.') : `Self-test failed: ${r.error || 'unknown error'}`, r.ok ? 'good' : 'danger');
+  } catch {
+    showToast('Could not run the self-test.', 'danger');
+  } finally {
+    if (btn) btn.disabled = false;
+    loadBotCardStatus(true);
+  }
+};
 
 window.renderHistoryTable = function renderHistoryTable() {
   const tbody = document.getElementById('history-tbody');
