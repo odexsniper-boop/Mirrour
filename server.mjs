@@ -219,6 +219,18 @@ setInterval(() => {
   if (engine.realTradingActive()) refreshRealBalance();
 }, 15_000).unref?.();
 
+// Right after a real buy or sell: re-read the bot wallet (the swap's SOL is already there) and
+// push the new balance to every open page, so it shows at once instead of on the next 15 s read
+engine.onUpdate((evt) => {
+  if ((evt.type !== 'position_sold' && evt.type !== 'position_opened') || evt.payload?.position?.isPaper !== false) return;
+  for (const delay of [1500, 6000]) {
+    setTimeout(async () => {
+      const bal = await refreshRealBalance();
+      if (bal) broadcastRaw({ event: 'bot_balance', data: bal });
+    }, delay).unref?.();
+  }
+});
+
 engine.onUpdate((evt) => {
   if (!sseClients.size) {
     if (evt.type === 'follows_updated' || evt.type === 'state_reset') liveSignals.sync();

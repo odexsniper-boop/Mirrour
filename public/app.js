@@ -32,6 +32,19 @@ function connectSseStream() {
       const payload = JSON.parse(evt.data);
       if (handleLiveSse(payload)) return;
       if (payload.event === 'position_sold' || payload.event === 'records_pruned' || payload.event === 'state_reset' || payload.event === 'history_cleared') pnlSummary.at = 0; // refetch totals
+      // real trade closed/opened: the bot wallet balance changed on-chain — show it right away
+      if (payload.event === 'bot_balance' && payload.data) {
+        window.__botStatus = { ...(window.__botStatus || {}), balance: payload.data };
+        if (botCardStatus) botCardStatus.balance = payload.data;
+        try {
+          renderBotWalletCard(true);
+          renderBalancesEverywhereLite();
+          renderKpiStrip();
+        } catch {
+          // page still loading
+        }
+        return;
+      }
       if (payload.state) {
         engineState = payload.state;
         renderTerminalAll();
