@@ -1916,6 +1916,64 @@ export class CopyTradingEngine {
     return removed;
   }
 
+  /**
+   * Ghost positions: a real position whose tokens are gone from the wallet, while the bot's own
+   * swap log shows a successful sell of that coin that was never booked (e.g. made by the
+   * previous copy during a redeploy). Close it with those exact proceeds.
+   */
+  reconcileRealTrades(trades = []) {
+    const booked = [];
+    for (const pos of this.positions) {
+      if (pos.isPaper !== false || !(pos.remainingTokens > 0) || !pos.realTokensMissing) continue;
+      const t = trades.find((x) => x?.side === 'sell' && x.ok === true && x.mint === pos.tokenAddress && x.t >= (pos.openedAt || 0) && Number(x.usd) >= 0 && !this.history.some((h) => h.txHash && h.txHash === x.signature));
+      if (!t) continue;
+      this.bookExternalRealSell(pos, { receivedUsd: Number(t.usd), networkFeeUsd: Number(t.networkFeeUsd || 0), txHash: t.signature || null, at: t.t });
+      booked.push(pos.id);
+    }
+    return booked;
+  }
+
+  bookExternalRealSell(pos, { receivedUsd, networkFeeUsd = 0, txHash = null, at = Date.now(), cause = 'sold (recovered record)' }) {
+    const wallet = this.getWalletById(pos.walletId);
+    const netProceedsUsd = Math.max(0, receivedUsd - networkFeeUsd);
+    const costBasisSoldUsd = pos.remainingCostUsd;
+    const tokensSold = pos.remainingTokens;
+    const pnlUsd = netProceedsUsd - costBasisSoldUsd;
+    const pnlPct = costBasisSoldUsd > 0 ? (pnlUsd / costBasisSoldUsd) * 100 : 0;
+    const px = Number(CHAINS.solana?.nativePriceUsd) || 0;
+    pos.realizedPnlUsd = Number(((pos.realizedPnlUsd || 0) + pnlUsd).toFixed(4));
+    pos.soldUsd = Number(((pos.soldUsd || 0) + netProceedsUsd).toFixed(4));
+    pos.soldTokens = Number(((pos.soldTokens || 0) + tokensSold).toFixed(6));
+    if (pos.investedSol != null && px > 0) pos.soldSol = Number(((pos.soldSol || 0) + netProceedsUsd / px).toFixed(6));
+    pos.remainingTokens = 0;
+    pos.remainingCostUsd = 0;
+    pos.armedOrders = [];
+    pos.closedAt = at;
+    pos.lastSellAt = at;
+    pos.closeCause = cause;
+    pos.realTokensMissing = false;
+    this.creditWalletForSell(wallet, pos.chainId, netProceedsUsd, pos.tradingAssetUsed, false);
+    const receipt = {
+      id: `hist-${randomUUID().slice(0, 8)}`, status: 'filled', side: 'sell', cause, isPaper: false, chainId: pos.chainId,
+      walletId: wallet.id, walletName: wallet.name, traderHandle: pos.traderHandle, followId: pos.followId || null, traderWallet: pos.traderWallet || null,
+      symbol: pos.symbol, tokenAddress: pos.tokenAddress, amountUsd: netProceedsUsd, tokens: tokensSold, fillPriceUsd: tokensSold > 0 ? receivedUsd / tokensSold : null,
+      traderPriceUsd: null, chaseGapPct: null, platformFeeUsd: 0, networkFeeUsd, gasless: false,
+      pnlUsd: Number(pnlUsd.toFixed(2)), pnlPct: Number(pnlPct.toFixed(2)), reason: null, txHash, explorerUrl: txHash ? `https://solscan.io/tx/${txHash}` : null, timestamp: at,
+    };
+    this.history.unshift(receipt);
+    this.history.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+    this.realizedLog.push({
+      t: at, pnl: receipt.pnlUsd, paper: false, sym: pos.symbol, cost: Number(costBasisSoldUsd.toFixed(4)), sol: px > 0 ? Number((receipt.pnlUsd / px).toFixed(6)) : null,
+      pid: pos.id, closes: true, posPnl: Number(Number(pos.realizedPnlUsd || 0).toFixed(2)), fid: pos.followId || null,
+      held: Math.max(0, Math.round((at - pos.openedAt) / 1000)), slipIn: Number.isFinite(pos.entrySlipPct) ? pos.entrySlipPct : null, slipOut: null, lag: Number.isFinite(pos.detectLagSec) ? pos.detectLagSec : null,
+    });
+    this.realizedLog.sort((a, b) => a.t - b.t);
+    this.evaluateRiskLimitsOnClose(pos, pnlUsd);
+    this.alerts.unshift({ id: `alt-${randomUUID().slice(0, 8)}`, level: pnlUsd >= 0 ? 'success' : 'warning', title: `Recovered sell · $${pos.symbol}`, message: `This position was already sold on-chain for $${netProceedsUsd.toFixed(2)} (${pnlUsd >= 0 ? '+' : ''}$${pnlUsd.toFixed(2)}). The record is now fixed.`, timestamp: Date.now() });
+    this.emit('position_sold', { position: pos, receipt });
+    return receipt;
+  }
+
   /** A real sell that did not go through: alert (once a minute per position), nothing booked. */
   realSellFailed(pos, error, execResult = null) {
     const now = Date.now();

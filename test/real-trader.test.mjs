@@ -499,3 +499,30 @@ test('sell fix: Token-2022 tokens missed by the mint lookup are still found and 
   assert.equal(p.remainingTokens, 0, 'sold');
   assert.equal(w.tok, 0n, 'wallet emptied of the token');
 });
+
+test('ghost fix: a real sell found in the swap log but never booked closes the position with the exact proceeds', async () => {
+  const { w, trader } = world();
+  const { e, f } = engineFor(trader, { mode: 'buy-hold' });
+  await e.processTraderSignal(buySig(f));
+  const p = e.positions[0];
+  const cost = p.remainingCostUsd;
+  // the previous copy of the bot sold it during a redeploy; this copy never recorded it
+  const sold = await trader.execute({ side: 'sell', token: { address: MINT, symbol: 'MEME', currentPriceUsd: 0.00002 }, amountUsd: 40, slippagePct: null, tokenAmount: 'all', assetMode: 'native' });
+  assert.equal(sold.ok, true);
+  assert.equal(w.tok, 0n);
+  // nothing happens while the tokens are not yet confirmed gone
+  assert.deepEqual(e.reconcileRealTrades(trader.trades), []);
+  p.realTokensMissing = true;
+  const booked = e.reconcileRealTrades(trader.trades);
+  assert.deepEqual(booked, [p.id]);
+  assert.equal(p.remainingTokens, 0);
+  const rec = e.history[0];
+  assert.equal(rec.side, 'sell');
+  assert.equal(rec.txHash, trader.trades[0].signature);
+  const expectedNet = trader.trades[0].usd - trader.trades[0].networkFeeUsd;
+  assert.ok(Math.abs(rec.amountUsd - expectedNet) < 0.01, `proceeds ${rec.amountUsd} vs ${expectedNet}`);
+  assert.ok(Math.abs(rec.pnlUsd - (expectedNet - cost)) < 0.02);
+  assert.equal(e.realizedLog.at(-1).closes, true);
+  // running it again books nothing twice
+  assert.deepEqual(e.reconcileRealTrades(trader.trades), []);
+});

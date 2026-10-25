@@ -183,7 +183,8 @@ export class PersistenceManager {
       this.saves += 1;
       // Cloud backup: real changes go up within seconds; price-only updates at most once a minute
       // (each upload is the whole ~0.5 MB state)
-      if (this.cloud?.enabled && (this.cloudDirty !== false || Date.now() - (this.lastCloudAt || 0) > 60_000)) {
+      // cloudPaused: another copy of the bot owns the account right now — never overwrite its data
+      if (this.cloud?.enabled && !this.cloudPaused && (this.cloudDirty !== false || Date.now() - (this.lastCloudAt || 0) > 60_000)) {
         this.cloud.schedule(entries);
         this.lastCloudAt = Date.now();
         this.cloudDirty = false;
@@ -247,7 +248,7 @@ export class PersistenceManager {
 
   async closeAsync() {
     this.close({ keepStore: true });
-    if (this.cloud?.enabled) await this.cloud.flush();
+    if (this.cloud?.enabled && !this.cloudPaused) await this.cloud.flush();
     this.store.close();
   }
 

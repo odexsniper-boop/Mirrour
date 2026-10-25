@@ -123,12 +123,18 @@ engine.onUpdate((evt) => notifier.handleEngineEvent(evt));
 setInterval(() => notifier.scanAlerts(), 4000).unref?.();
 // On a public deploy, real trading needs a site password (otherwise anyone with the link could trade)
 const realBlockedReason = ON_RAILWAY && !SITE_PASSWORD ? 'public deploy without ODEX_PASSWORD: real trading is disabled' : null;
+const startedAt = Date.now();
+let shuttingDownFlag = false;
 // One bot at a time: when another copy of Odex Mirror (PC or Railway) is running on the same
 // Supabase account, this one does not trade real SOL (two copies would buy everything twice).
 const INSTANCE_ID = `${ON_RAILWAY ? 'railway' : 'pc'}-${Math.random().toString(36).slice(2, 10)}`;
 let otherInstance = null; // { id, host, at } of the other running copy, if any
+let ownsLock = false; // this copy holds the one-bot lock
+// Until the first lock check, don't upload anything: another copy may still own the account
+if (persistence && supabase.enabled) persistence.cloudPaused = true;
 async function instanceHeartbeat() {
   if (!supabase.enabled) return;
+  if (shuttingDownFlag) return;
   try {
     const rows = await supabase.request('GET', '?key=eq.instance_lock&select=value');
     const cur = Array.isArray(rows) ? rows[0]?.value : null;
@@ -140,16 +146,56 @@ async function instanceHeartbeat() {
         engine.emit('alerts_updated', {});
       }
       otherInstance = cur;
+      ownsLock = false;
+      if (persistence) persistence.cloudPaused = true; // never overwrite the other copy's data
       return;
     }
+    const takingOver = !ownsLock;
     otherInstance = null;
     await supabase.push([['instance_lock', { id: INSTANCE_ID, host: ON_RAILWAY ? 'Railway' : 'your PC', at: now }]]);
+    ownsLock = true;
+    if (takingOver && persistence) {
+      // Taking over: load what the other copy saved last (trades it made while we waited), then
+      // resume uploads. Only if the cloud data is newer than what we started with.
+      try {
+        const rows = await supabase.pullAll();
+        const cloudEngine = rows.get('engine');
+        if (cloudEngine && Number(cloudEngine.savedAt || 0) > startedAt) {
+          persistence.restoreFromRows(rows);
+          liveSignals.sync();
+          console.log('One-bot lock: took over and loaded the latest data from Supabase');
+        }
+        const rt = rows.get('realTrader');
+        if (rt && Array.isArray(rt.trades) && rt.trades.length >= realTrader.trades.length) {
+          realTrader.trades = rt.trades;
+          if (Array.isArray(rt.spendLog)) realTrader.spendLog = rt.spendLog;
+        }
+      } catch (err) {
+        console.log(`One-bot lock: could not load the latest data (${err.message})`);
+      }
+      persistence.cloudPaused = false;
+      try {
+        engine.reconcileRealTrades(realTrader.trades);
+      } catch {
+        // best effort
+      }
+    }
   } catch {
     // Supabase unreachable: keep the last known state
   }
 }
 instanceHeartbeat();
 setInterval(instanceHeartbeat, 25_000).unref?.();
+// Ghost positions (sold on-chain but not recorded, e.g. during a redeploy): fix them from the
+// bot's own swap log every 30 s
+setInterval(() => {
+  if (otherInstance || shuttingDownFlag) return;
+  try {
+    engine.reconcileRealTrades(realTrader.trades);
+  } catch {
+    // best effort
+  }
+}, 30_000).unref?.();
 engine.adapter.realEnabled = () => realTrader.ready() && !realBlockedReason && !otherInstance;
 engine.adapter.realBuyRoomUsd = () => realTrader.buyRoomUsd();
 engine.realTradingActive = () => !engine.settings.paperTrading && engine.adapter.realEnabled();
@@ -211,7 +257,7 @@ let autoTickEnabled = true;
 // logged and the next tick runs normally (it must never stop exits on open positions)
 let ticksRunning = 0;
 setInterval(async () => {
-  if (!autoTickEnabled || ticksRunning >= 2) return;
+  if (!autoTickEnabled || ticksRunning >= 2 || shuttingDownFlag) return;
   ticksRunning += 1;
   try {
     await engine.tickMarketPrices();
@@ -1598,6 +1644,7 @@ let shuttingDown = false;
 function shutdown(signal) {
   if (shuttingDown) return;
   shuttingDown = true;
+  shuttingDownFlag = true; // stop exits and lock refreshes right away
   liveSignals.watcher.stop();
   // free the one-bot-at-a-time lock so another copy can take over right away
   if (supabase.enabled && !otherInstance) supabase.push([['instance_lock', { id: INSTANCE_ID, host: 'stopped', at: 0 }]]).catch(() => {});
