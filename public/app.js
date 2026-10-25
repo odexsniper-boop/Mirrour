@@ -3488,7 +3488,7 @@ window.goTerminalTab = function goTerminalTab(tab) {
 // Footer status bar: Solana ping + website bug checker
 // ---------------------------------------------------------------------------
 // Skips that are the bot doing its job — used only to keep those out of popups
-const NORMAL_SKIP_RE = /manages exits itself|doesn't copy sells|nothing tracked to sell|below your minimum|watched manually|your account is paused|already holding|cooldown|price moved too far|top-ups not copied/i;
+const NORMAL_SKIP_RE = /manages exits itself|doesn't copy sells|nothing tracked to sell|below your minimum|watched manually|your account is paused|trader paused|already holding|cooldown|price moved too far|top-ups not copied/i;
 
 /** A "not copied" badge: expected skips (rules doing their job) are neutral; real problems stay yellow. */
 function skipBadge(reason) {
@@ -5817,4 +5817,18 @@ window.syncEditFollowCopyAll = function syncEditFollowCopyAll() {
   const all = chase >= 1000 && document.getElementById('ef-topups').value === 'true';
   document.getElementById('ef-copyall').checked = all;
   document.getElementById('ef-copyall-hint').hidden = !all;
+};
+
+
+// One-click "Fast scalp" exit preset (Auto-Exit, every exit sells the whole position)
+window.applyFastScalp = async function applyFastScalp() {
+  const id = document.getElementById('edit-follow-id')?.value;
+  if (!id) return;
+  const res = await fetch(`/api/follows/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ useFastScalp: true }) });
+  const data = await res.json();
+  if (!data.ok) return showToast(data.error || 'Could not apply the preset.', 'danger');
+  engineState = data.state;
+  renderTerminalAll();
+  closeModal('modal-exit-rules');
+  showToast('Fast scalp applied: Auto-Exit, +12% take profit, 15% trail, −25% floor, 3 min cap', 'good');
 };

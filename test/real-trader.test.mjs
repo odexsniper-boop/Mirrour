@@ -526,3 +526,70 @@ test('ghost fix: a real sell found in the swap log but never booked closes the p
   // running it again books nothing twice
   assert.deepEqual(e.reconcileRealTrades(trader.trades), []);
 });
+
+// ---------- Fast scalp + full closes (Oct 25) ----------
+import { fastScalpExitRules } from '../engine/copyEngine.mjs';
+
+test('fast scalp: +12% take profit sells the WHOLE position (nothing left behind)', async () => {
+  const { w, trader } = world();
+  const { e, f } = engineFor(trader, { mode: 'auto-exit' });
+  f.exitRules = fastScalpExitRules();
+  await e.processTraderSignal(buySig(f));
+  const p = e.positions[0];
+  p.currentPriceUsd = p.entryPriceUsd * 1.15;
+  const r = await e.evaluatePositionExits(p);
+  assert.notEqual(r?.ok, false, JSON.stringify(r));
+  assert.equal(p.remainingTokens, 0, 'fully closed');
+  assert.equal(w.tok, 0n, 'no tokens left in the wallet');
+});
+
+test('fast scalp: the −25% floor closes everything; a partial sell never leaves dust under $2', async () => {
+  const { w, trader } = world();
+  const { e, f } = engineFor(trader, { mode: 'auto-exit' });
+  f.exitRules = fastScalpExitRules();
+  await e.processTraderSignal(buySig(f));
+  const p = e.positions[0];
+  p.currentPriceUsd = p.entryPriceUsd * 0.7;
+  await e.evaluatePositionExits(p);
+  assert.equal(p.remainingTokens, 0);
+  assert.equal(w.tok, 0n);
+  // dust rule: a 95% sell of a ~$10 position would leave ~$0.50 → sells 100%
+  const b = engineFor(world().trader, { mode: 'buy-hold', size: 10 });
+  await b.e.processTraderSignal(buySig(b.f));
+  const q = b.e.positions[0];
+  await b.e.executePositionSell(q.id, { sellPct: 95, cause: 'manual sell' });
+  assert.equal(q.remainingTokens, 0, 'no dust left');
+});
+
+test('time cap closes the moonbag too (no position held forever after initials)', async () => {
+  const { trader } = world();
+  const { e, f } = engineFor(trader, { mode: 'auto-exit' });
+  f.exitRules = createDefaultExitRules({ takeInitials: { enabled: true, takeAtPct: 10, sellSizePct: 50 }, hardTimeCap: { enabled: true, timeCapSec: 60 } });
+  await e.processTraderSignal(buySig(f));
+  const p = e.positions[0];
+  p.currentPriceUsd = p.entryPriceUsd * 1.2;
+  await e.evaluatePositionExits(p); // initials: 50% sold
+  assert.ok(p.remainingTokens > 0 && p.initialsTaken);
+  p.currentPriceUsd = p.entryPriceUsd * 1.0;
+  await e.evaluatePositionExits(p, p.openedAt + 61_000); // time cap: the rest
+  assert.equal(p.remainingTokens, 0);
+});
+
+test('a failing real exit retries with more slippage room (auto → 25% → 50%)', async () => {
+  const { w, trader, lastOrder } = world();
+  const { e, f } = engineFor(trader, { mode: 'buy-hold' });
+  await e.processTraderSignal(buySig(f));
+  const p = e.positions[0];
+  w.executeMode = 'fail';
+  await e.executePositionSell(p.id, { sellPct: 100, cause: 'stop-loss hit' });
+  assert.equal(p.realSellFails, 1);
+  trader.sellBlockedUntil.clear();
+  await e.executePositionSell(p.id, { sellPct: 100, cause: 'stop-loss hit' });
+  assert.equal(lastOrder.slippageBps, '2500', 'second try: 25%');
+  trader.sellBlockedUntil.clear();
+  w.executeMode = 'ok';
+  await e.executePositionSell(p.id, { sellPct: 100, cause: 'stop-loss hit' });
+  assert.equal(lastOrder.slippageBps, '5000', 'third try: 50%');
+  assert.equal(p.remainingTokens, 0, 'got out');
+  assert.equal(p.realSellFails, 0);
+});

@@ -57,6 +57,21 @@ export function recommendedExitRules() {
   });
 }
 
+/**
+ * "Fast scalp": for traders whose coins pump and dump within 1–3 minutes. Every rule sells the
+ * WHOLE position (no moonbag left behind): +12% take profit, 15% trailing stop from +8%,
+ * a fixed −25% floor, close after 3 minutes. No wave-cut (it sold dips right before pumps).
+ */
+export function fastScalpExitRules() {
+  return createDefaultExitRules({
+    takeInitials: { enabled: true, takeAtPct: 12, sellSizePct: 100 },
+    moonbagTrail: { enabled: true, trailPct: 15, armsAtPct: 8 },
+    floor: { enabled: true, openingFloorPct: 25, tightensAfterSec: 3600, tightFloorPct: 25 },
+    waveCut: { enabled: false, afterSec: 90, needsPeakPct: 5 },
+    hardTimeCap: { enabled: true, timeCapSec: 180 },
+  });
+}
+
 export function activeExitRuleCount(rules) {
   return Object.values(rules || {}).filter((r) => r && r.enabled).length;
 }
@@ -479,7 +494,7 @@ export class CopyTradingEngine {
     const token = signal.token;
 
     if (follow.status !== 'copying') {
-      return this.recordSkip({ dryRun, follow, wallet, signal, reason: 'your account is paused' });
+      return this.recordSkip({ dryRun, follow, wallet, signal, reason: follow.pauseReason === 'panic_sell' ? 'trader paused (Panic sell) — press Resume to copy again' : follow.pauseReason === 'slow' ? "trader paused (bot can't keep up)" : follow.pauseReason === 'streak' ? 'trader paused (losing streak)' : 'trader paused — press Resume to copy again' });
     }
 
     const maxAge = follow.chainId === 'solana' ? Number(this.settings.maxSignalAgeSec ?? 90) : 30;
@@ -975,6 +990,8 @@ export class CopyTradingEngine {
       fraction = Math.min(1, exactTokens / pos.remainingTokens);
     }
 
+    // never leave dust behind: if what would remain is worth under $2, sell the whole position
+    if (fraction < 1 && pos.remainingTokens * (1 - fraction) * (Number(pos.currentPriceUsd) || 0) < 2) fraction = 1;
     let tokensSold = pos.remainingTokens * fraction;
     const real = !pos.isPaper && this.adapter.useLive?.({ paper: false, chainId: pos.chainId });
     // A real position can only be sold for real. If real trading is unavailable right now (key not
@@ -1015,6 +1032,9 @@ export class CopyTradingEngine {
     // Real sells with no slippage set: Jupiter picks it from live conditions (a fixed 1% fails
     // most pump.fun sells). Paper keeps the modelled default.
     let sellSlippagePct = userSellSlip !== null ? userSellSlip : real ? null : baseSellSlip;
+    // a real exit that keeps failing (price falling faster than the slippage allows) retries with
+    // more room so it always gets out: Jupiter auto → 25% → 50%
+    if (real && userSellSlip === null && pos.realSellFails > 0) sellSlippagePct = pos.realSellFails >= 2 ? 50 : 25;
 
     let quote;
     try {
@@ -1088,6 +1108,7 @@ export class CopyTradingEngine {
     if (real && (!execResult || execResult.ok === false)) {
       return this.realSellFailed(pos, execResult?.error || 'unknown error', execResult);
     }
+    if (real) pos.realSellFails = 0;
     if (real && Number(execResult.tokensSold) > 0) {
       // book exactly what left the wallet
       const actual = Number(execResult.tokensSold);
@@ -1418,7 +1439,8 @@ export class CopyTradingEngine {
       if (rules.hardTimeCap?.enabled && ageSec >= Number(rules.hardTimeCap.timeCapSec) && !pos.timeCapExecuted) {
         pos.timeCapExecuted = true;
         if (pos.initialsTaken) {
-          return null;
+          // time is up: close whatever is left (the moonbag) instead of holding it forever
+          return this.executePositionSell(pos.id, { sellPct: 100, cause: 'time cap reached' });
         }
         const mainSellPct = rules.takeInitials?.enabled ? Number(rules.takeInitials.sellSizePct) : 100;
         pos.initialsTaken = true;
@@ -1996,6 +2018,7 @@ export class CopyTradingEngine {
       return { ok: false, error, realFailed: true };
     }
     pos.realMissingChecks = 0;
+    if (!execResult?.backoff) pos.realSellFails = (pos.realSellFails || 0) + 1;
     if (!execResult?.backoff && (!pos.lastSellBlockedAlertAt || now - pos.lastSellBlockedAlertAt > 60_000 || execResult?.unknown)) {
       pos.lastSellBlockedAlertAt = now;
       this.alerts.unshift({

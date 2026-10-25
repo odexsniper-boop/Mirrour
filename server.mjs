@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { CopyTradingEngine, createDefaultExitRules, recommendedExitRules, activeExitRuleCount, createDefaultUiSettings } from './engine/copyEngine.mjs';
+import { CopyTradingEngine, createDefaultExitRules, recommendedExitRules, fastScalpExitRules, activeExitRuleCount, createDefaultUiSettings } from './engine/copyEngine.mjs';
 import { CHAINS } from './engine/chainAdapters.mjs';
 import { LiveSignalService } from './engine/liveSignals.mjs';
 import { isSolanaAddress } from './engine/walletWatcher.mjs';
@@ -794,6 +794,10 @@ export const server = http.createServer(async (req, res) => {
           if (body.mode === 'auto-exit' && !body.exitRules && activeExitRuleCount(follow.exitRules) === 0) follow.exitRules = recommendedExitRules();
         }
         if (body.useRecommendedExits) follow.exitRules = recommendedExitRules();
+        if (body.useFastScalp) {
+          follow.exitRules = fastScalpExitRules();
+          follow.mode = 'auto-exit';
+        }
         if (body.sizing) {
           follow.sizing = {
             type: body.sizing.type || follow.sizing.type,

@@ -123,7 +123,7 @@ export class RealTrader {
       maxSolPerTrade: num(env.ODEX_REAL_MAX_SOL_PER_TRADE, 0.5),
       maxSolPerDay: num(env.ODEX_REAL_MAX_SOL_PER_DAY, 2), // 0 = no daily cap
       reserveSol: num(env.ODEX_REAL_RESERVE_SOL, 0.02), // kept for fees + token-account rent
-      sellRetrySec: num(env.ODEX_REAL_SELL_RETRY_SEC, 10),
+      sellRetrySec: num(env.ODEX_REAL_SELL_RETRY_SEC, 3), // exits retry fast: a falling coin can't wait
     };
     this.keypair = null;
     this.keyError = null;
