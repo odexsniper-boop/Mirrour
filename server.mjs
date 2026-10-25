@@ -768,6 +768,13 @@ export const server = http.createServer(async (req, res) => {
             hardTimeCap: { ...follow.exitRules.hardTimeCap, ...(body.exitRules.hardTimeCap || {}) },
           });
         }
+        // per-trader overrides: max chase (null = account setting) and copying top-ups
+        if (body.maxChasePct !== undefined) {
+          const v = body.maxChasePct === null || body.maxChasePct === '' ? null : Number(body.maxChasePct);
+          if (v !== null && !(Number.isFinite(v) && v >= 1 && v <= 100000)) return sendJson(res, 400, { ok: false, error: 'Max chase must be between 1% and 100000%.' });
+          follow.maxChasePct = v;
+        }
+        if (body.copyTopUps !== undefined) follow.copyTopUps = body.copyTopUps === null || body.copyTopUps === '' ? null : Boolean(body.copyTopUps);
         if (body.filtersOverride) {
           follow.filtersOverride = {
             ...follow.filtersOverride,

@@ -1119,6 +1119,24 @@
           <button type="button" class="btn ef-rules-btn" id="ef-rules-btn" onclick="openExitRulesFromEdit()">Edit exit rules <span class="mono rule-count" id="ef-rules-count">0/5</span></button>
         </div>
       </div>
+      <div class="ef-copyall">
+        <label class="switch-row"><input type="checkbox" class="rule-toggle" id="ef-copyall" onchange="onEditFollowCopyAll()" /><span><b>Copy every trade</b> — no price-chase limit, top-ups copied too</span></label>
+      </div>
+      <div class="form-row">
+        <div class="field">
+          <label for="ef-max-chase">Max chase for this trader (%)</label>
+          <input type="number" id="ef-max-chase" class="input mono" min="1" step="any" placeholder="Account setting" oninput="syncEditFollowCopyAll()" />
+        </div>
+        <div class="field">
+          <label for="ef-topups">Top-ups (trader buys more of a coin)</label>
+          <select id="ef-topups" class="input" onchange="syncEditFollowCopyAll()">
+            <option value="">Use account setting</option>
+            <option value="false">One copy per trader position</option>
+            <option value="true">Copy every top-up</option>
+          </select>
+        </div>
+      </div>
+      <div class="ef-hint is-warn" id="ef-copyall-hint" hidden>Every buy is copied, even when the price already ran far past the trader's — late entries can lose money. A stop loss is recommended.</div>
       <div class="ef-msg" id="ef-msg" role="status"></div>
       <div class="modal-footer">
         <button class="btn" onclick="closeModal('modal-edit-follow')">Cancel</button>

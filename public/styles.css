@@ -6767,3 +6767,6 @@ body, button, input, select, textarea, .kpi-label, .card-title, .term-tab {
 .intg-msg.is-bad { color: #fb7185; }
 .intg-foot { margin: 14px 0 0; font-size: 11.5px; color: var(--text-mute, #8b8d97); }
 @media (max-width: 900px) { .intg-list { grid-template-columns: 1fr; } }
+.ef-copyall { margin: 4px 0 12px; padding: 12px 14px; border-radius: 12px; background: rgba(139,92,246,0.08); border: 1px solid rgba(139,92,246,0.3); }
+.ef-copyall b { color: #fff; font-weight: 500; }
+.status-pill.status-copyall { background: rgba(139,92,246,0.14) !important; color: #c4b5fd !important; }

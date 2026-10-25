@@ -1538,7 +1538,7 @@ function renderFollowsList() {
               <div>
                 <div class="follow-name-row">
                   <strong class="follow-name">${esc(f.name)}</strong>
-                  <span class="status-pill ${isCopying ? 'status-copying' : 'status-paused'}">${isCopying ? 'Copying' : slow ? "Paused · can't keep up" : 'Paused'}</span>
+                  <span class="status-pill ${isCopying ? 'status-copying' : 'status-paused'}">${isCopying ? 'Copying' : slow ? "Paused · can't keep up" : 'Paused'}</span>${f.copyTopUps === true && Number(f.maxChasePct) >= 1000 ? '<span class="status-pill status-copyall" title="No price-chase limit, top-ups copied">Copy every trade</span>' : ''}
                   ${chainBadgeHtml(f.chainId)}
                 </div>
                 <div class="follow-sub mono"><a href="https://solscan.io/account/${encodeURIComponent(f.traderWallet)}" target="_blank" rel="noopener" title="${f.traderWallet}">${f.traderWallet.slice(0, 6)}…${f.traderWallet.slice(-6)}</a> · copies real swaps</div>
@@ -5628,6 +5628,9 @@ window.openEditFollowModal = function openEditFollowModal(id) {
   const on = Object.values(f.exitRules || {}).filter((r) => r && r.enabled).length;
   document.getElementById('ef-rules-count').textContent = `${on}/5`;
   document.getElementById('ef-msg').textContent = '';
+  set('ef-max-chase', f.maxChasePct);
+  set('ef-topups', f.copyTopUps === true ? 'true' : f.copyTopUps === false ? 'false' : '');
+  syncEditFollowCopyAll();
   onEditFollowSizing();
   onEditFollowMode();
   document.getElementById('modal-edit-follow').classList.add('open');
@@ -5666,7 +5669,13 @@ window.saveEditFollow = async function saveEditFollow() {
     maxOpenPositions: num('ef-max-open'),
     maxAtRiskUsd: num('ef-max-risk'),
     filtersOverride: { pumpOnly: pump === '' ? null : pump === 'true' },
+    maxChasePct: num('ef-max-chase'),
+    copyTopUps: val('ef-topups') === '' ? null : val('ef-topups') === 'true',
   };
+  if (body.maxChasePct !== null && !(body.maxChasePct >= 1)) {
+    msg.textContent = 'Max chase must be at least 1% (leave it empty to use the account setting).';
+    return;
+  }
   const btn = document.getElementById('ef-save');
   btn.disabled = true;
   try {
@@ -5792,4 +5801,20 @@ window.intgTest = async function intgTest(app) {
 window.intgDisconnect = async function intgDisconnect(app) {
   const d = await intgPost(app, 'disconnect');
   intgMsg(app, d.ok ? `${INTG[app].name} disconnected.` : d.error, d.ok ? '' : 'bad');
+};
+
+
+// "Copy every trade": no chase limit (100000%) + every top-up copied, for this trader only
+const COPY_ALL_CHASE = 100000;
+window.onEditFollowCopyAll = function onEditFollowCopyAll() {
+  const on = document.getElementById('ef-copyall').checked;
+  document.getElementById('ef-max-chase').value = on ? String(COPY_ALL_CHASE) : '';
+  document.getElementById('ef-topups').value = on ? 'true' : '';
+  syncEditFollowCopyAll();
+};
+window.syncEditFollowCopyAll = function syncEditFollowCopyAll() {
+  const chase = Number(document.getElementById('ef-max-chase').value);
+  const all = chase >= 1000 && document.getElementById('ef-topups').value === 'true';
+  document.getElementById('ef-copyall').checked = all;
+  document.getElementById('ef-copyall-hint').hidden = !all;
 };

@@ -107,3 +107,25 @@ test('missed entry: when the trader’s first buy ran too far to copy, their top
   const [c] = await e.processTraderSignal({ chainId: 'solana', side: 'buy', traderWallet: f.traderWallet, traderBuyUsd: 100, signature: 'm4', ageSec: 1, token: tok(1, mint) });
   assert.equal(c.status, 'filled', JSON.stringify(c));
 });
+
+test('per-trader "copy every trade": no chase limit and top-ups copied, other traders keep the account rules', async () => {
+  const { e, f } = setup();
+  e.settings.copyTopUps = false;
+  e.settings.maxChasePct = 25;
+  f.maxChasePct = 100000;
+  f.copyTopUps = true;
+  const mint = `${MINT.slice(0, -4)}8888`;
+  // price already ran 60% past the trader → still copied for this trader
+  const [a] = await e.processTraderSignal({ chainId: 'solana', side: 'buy', traderWallet: f.traderWallet, traderBuyUsd: 300, signature: 'c1', ageSec: 2, token: { ...tok(1, mint), currentPriceUsd: 1.6 } });
+  assert.equal(a.status, 'filled', JSON.stringify(a));
+  // top-up copied too
+  const [b] = await e.processTraderSignal({ chainId: 'solana', side: 'buy', traderWallet: f.traderWallet, traderBuyUsd: 26, signature: 'c2', ageSec: 1, token: tok(1.7, mint) });
+  assert.equal(b.status, 'filled', JSON.stringify(b));
+  assert.equal(e.positions.filter((p) => p.tokenAddress === mint).length, 2);
+  // a second trader without overrides still uses the 25% account limit
+  const g = { ...f, id: 'fol-other', traderWallet: 'H8sMJSCQxfKiFTCfDR3DUMLPwcRbM61LGFJ8N4dK3WjS', maxChasePct: null, copyTopUps: null };
+  e.follows.push(g);
+  const [c] = await e.processTraderSignal({ chainId: 'solana', side: 'buy', traderWallet: g.traderWallet, traderBuyUsd: 300, signature: 'c3', ageSec: 2, token: { ...tok(1, `${MINT.slice(0, -4)}9998`), currentPriceUsd: 1.6 } });
+  assert.equal(c.status, 'skipped');
+  assert.match(c.reason, /price moved too far/);
+});

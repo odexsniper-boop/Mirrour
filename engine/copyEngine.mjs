@@ -446,7 +446,7 @@ export class CopyTradingEngine {
         follow,
         wallet: this.getWalletById(follow.walletId),
         signal,
-        reason: this.settings.copyTopUps ? 'a copy of this coin is already being bought' : 'trader is adding to a coin already copied (top-ups not copied)',
+        reason: this.copyTopUpsFor(follow) ? 'a copy of this coin is already being bought' : 'trader is adding to a coin already copied (top-ups not copied)',
       });
     }
     this.buysInFlight.add(key);
@@ -455,6 +455,16 @@ export class CopyTradingEngine {
     } finally {
       this.buysInFlight.delete(key);
     }
+  }
+
+  /** Per-trader overrides (null = use the account setting). */
+  copyTopUpsFor(follow) {
+    return typeof follow?.copyTopUps === 'boolean' ? follow.copyTopUps : Boolean(this.settings.copyTopUps);
+  }
+
+  maxChaseFor(follow) {
+    const v = Number(follow?.maxChasePct);
+    return follow?.maxChasePct !== null && follow?.maxChasePct !== undefined && Number.isFinite(v) && v > 0 ? v : Number(this.settings.maxChasePct ?? 25);
   }
 
   /** Losses realized in the last 24 h for one mode (paper or real). */
@@ -489,12 +499,13 @@ export class CopyTradingEngine {
 
     const traderBuyUsd = Number(signal.traderBuyUsd ?? 100);
     // Top-up of a coin we already copied in this trader position (they haven't fully sold yet)
-    if (!this.settings.copyTopUps && token.address && this.copiedCycleActive(follow.id, token.address)) {
+    const copyTopUps = this.copyTopUpsFor(follow);
+    if (!copyTopUps && token.address && this.copiedCycleActive(follow.id, token.address)) {
       return this.recordSkip({ dryRun, follow, wallet, signal, reason: 'trader is adding to a coin already copied (top-ups not copied)' });
     }
     // The trader's first buy of this coin was missed (price had run / seen too late): their later
     // buys of the same position come even later, so they are not copied as a fresh entry either
-    if (!this.settings.copyTopUps && token.address && this.copiedCycleActive(follow.id, token.address, 'missed')) {
+    if (!copyTopUps && token.address && this.copiedCycleActive(follow.id, token.address, 'missed')) {
       return this.recordSkip({ dryRun, follow, wallet, signal, reason: "trader's first buy was too late to copy — their top-ups are skipped too (top-ups not copied)" });
     }
 
@@ -705,7 +716,7 @@ export class CopyTradingEngine {
     const chaseGapPct =
       traderFillPrice > 0 ? ((quote.quotedPriceUsd - traderFillPrice) / traderFillPrice) * 100 : 0;
 
-    if (traderFillPrice > 0 && chaseGapPct > this.settings.maxChasePct) {
+    if (traderFillPrice > 0 && chaseGapPct > this.maxChaseFor(follow)) {
       if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
       return this.recordSkip({
         dryRun,
