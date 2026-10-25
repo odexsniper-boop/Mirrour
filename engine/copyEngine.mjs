@@ -941,6 +941,15 @@ export class CopyTradingEngine {
   }
 
   async executePositionSell(positionId, opts = {}) {
+    // A sell YOU press (manual, Sell all, Panic sell) always tries again, even if earlier checks
+    // said the tokens were gone: a temporary balance-read problem must never trap a position.
+    if (/manual|sell all|panic|initials/i.test(String(opts.cause || 'manual sell'))) {
+      const p = this.positions.find((x) => x.id === positionId);
+      if (p && p.realTokensMissing) {
+        p.realTokensMissing = false;
+        p.realMissingChecks = 0;
+      }
+    }
     // one sell per position at a time: real swaps take seconds and exits are checked every tick
     if (!this.sellsInFlight) this.sellsInFlight = new Set();
     if (this.sellsInFlight.has(positionId)) return { ok: false, error: 'A sell for this position is already in progress.', inFlight: true };
@@ -1284,7 +1293,12 @@ export class CopyTradingEngine {
     // A real sell can fail (no route, slippage, network). Exit rules mark themselves done
     // before selling, so undo those marks when a real sell did not happen and it is retried.
     const before = { initialsTaken: pos.initialsTaken, timeCapExecuted: pos.timeCapExecuted, armedOrders: Array.isArray(pos.armedOrders) ? pos.armedOrders.slice() : pos.armedOrders };
-    if (!pos.isPaper && pos.realTokensMissing) return null;
+    // tokens looked gone: keep exits paused, but re-check once a minute (a balance read can fail
+    // for a while — the position must not be left without exits for good)
+    if (!pos.isPaper && pos.realTokensMissing) {
+      if (now - (pos.realMissingAt || 0) < 60_000) return null;
+      pos.realMissingAt = now;
+    }
     const res = await this.evaluatePositionExitRules(pos, now);
     // Any sell that did not happen (real failure, paper price-impact block, or another sell of
     // this position still in progress) must not leave its rule marked as done.
@@ -1911,6 +1925,7 @@ export class CopyTradingEngine {
       pos.realMissingChecks = (pos.realMissingChecks || 0) + 1;
       if (pos.realMissingChecks >= 3 && !pos.realTokensMissing) {
         pos.realTokensMissing = true;
+        pos.realMissingAt = now;
         this.alerts.unshift({
           id: `alt-${randomUUID().slice(0, 8)}`,
           level: 'danger',

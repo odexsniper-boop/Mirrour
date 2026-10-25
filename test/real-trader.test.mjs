@@ -353,7 +353,7 @@ test('audit: tokens moved out of the bot wallet pause exits after 3 checks (one 
   const p = e.positions[0];
   w.tok = 0n; // user sold in Phantom
   for (let i = 0; i < 4; i++) {
-    await e.executePositionSell(p.id, { sellPct: 100 });
+    await e.executePositionSell(p.id, { sellPct: 100, cause: 'stop-loss hit' }); // automatic exits
     tick(20_000);
   }
   assert.equal(p.realTokensMissing, true);
@@ -474,4 +474,28 @@ test('final: a real position is never "sold" on paper when real trading becomes 
   const r2 = await e.executePositionSell(p.id, { sellPct: 100 });
   assert.notEqual(r2.ok, false, JSON.stringify(r2));
   assert.equal(w.sent.length, 2);
+});
+
+test('sell fix: Token-2022 tokens missed by the mint lookup are still found and sold; a manual sell clears "tokens missing"', async () => {
+  const { w, trader } = world();
+  const { e, f } = engineFor(trader, { mode: 'buy-hold' });
+  await e.processTraderSignal(buySig(f));
+  const p = e.positions[0];
+  // simulate an RPC that returns nothing for the mint-filtered lookup (Token-2022 coin)
+  const realRpc = trader.rpc;
+  trader.rpc = async (method, params) => {
+    if (method === 'getTokenAccountsByOwner' && params[1]?.mint) return { value: [] };
+    if (method === 'getTokenAccountsByOwner' && params[1]?.programId) {
+      if (params[1].programId !== 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PXnBqCXEpPxuEb' || w.tok <= 0n) return { value: [] };
+      return { value: [{ account: { data: { parsed: { info: { mint: MINT, tokenAmount: { amount: w.tok.toString(), decimals: 6 } } } } } }] };
+    }
+    return realRpc(method, params);
+  };
+  // the position had been flagged as "tokens missing" by earlier failed checks
+  p.realTokensMissing = true;
+  p.realMissingChecks = 10;
+  const r = await e.executePositionSell(p.id, { sellPct: 100, cause: 'manual sell' });
+  assert.notEqual(r.ok, false, JSON.stringify(r));
+  assert.equal(p.remainingTokens, 0, 'sold');
+  assert.equal(w.tok, 0n, 'wallet emptied of the token');
 });

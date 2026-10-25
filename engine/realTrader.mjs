@@ -15,6 +15,8 @@ import { base58Decode, base58Encode } from './onchainMeta.mjs';
 
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 export const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
+const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
+const TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PXnBqCXEpPxuEb';
 const LAMPORTS = 1_000_000_000;
 const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 const DAY_MS = 86_400_000;
@@ -199,14 +201,33 @@ export class RealTrader {
 
   /** Raw (integer) token balance of the bot wallet for one mint, across all its token accounts. */
   async getTokenBalanceRaw(mint) {
+    const sum = (r, onlyMint) => {
+      let raw = 0n;
+      for (const acc of r?.value || []) {
+        const info = acc?.account?.data?.parsed?.info;
+        if (onlyMint && info?.mint !== mint) continue;
+        const amt = info?.tokenAmount;
+        if (amt?.amount) raw += BigInt(amt.amount);
+        if (Number.isInteger(amt?.decimals)) this.decimals.set(mint, amt.decimals);
+      }
+      return raw;
+    };
     const r = await this.rpc('getTokenAccountsByOwner', [this.address, { mint }, { encoding: 'jsonParsed', commitment: 'confirmed' }]);
-    let raw = 0n;
-    for (const acc of r?.value || []) {
-      const amt = acc?.account?.data?.parsed?.info?.tokenAmount;
-      if (amt?.amount) raw += BigInt(amt.amount);
-      if (Number.isInteger(amt?.decimals)) this.decimals.set(mint, amt.decimals);
+    const raw = sum(r, false);
+    if (raw > 0n) return raw;
+    // Nothing found by mint: also look through every token account of both token programs.
+    // Newer pump.fun coins are Token-2022 tokens and some RPC providers miss them in the
+    // mint-filtered lookup — that made held tokens look "gone" and blocked their sells.
+    let total = 0n;
+    for (const programId of [TOKEN_PROGRAM, TOKEN_2022_PROGRAM]) {
+      try {
+        const all = await this.rpc('getTokenAccountsByOwner', [this.address, { programId }, { encoding: 'jsonParsed', commitment: 'confirmed' }]);
+        total += sum(all, true);
+      } catch {
+        // try the other program
+      }
     }
-    return raw;
+    return total;
   }
 
   async refreshBalance() {
