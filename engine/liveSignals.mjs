@@ -261,6 +261,16 @@ export class LiveSignalService {
       (this.dustSigs || (this.dustSigs = new Set())).add(sig.signature); // remembered for the missed-trade audit
       return;
     }
+    // a coin bought before its name/logo were known shows as "B1Y2…pump": fill those in as soon as
+    // any later trade of it carries the details
+    const placeholder = sig.tokenMint ? `${sig.tokenMint.slice(0, 4)}…${sig.tokenMint.slice(-4)}` : null;
+    if (placeholder && sig.symbol && sig.symbol !== placeholder) {
+      try {
+        this.applyLateTokenInfo(sig.tokenMint, { symbol: sig.symbol, name: sig.name, imageUrl: sig.imageUrl, pairCreatedAt: sig.pairCreatedAt });
+      } catch {
+        // cosmetic only
+      }
+    }
     const record = { ...sig, decisions: await this.decide(sig), paperCopied: false };
 
     // Every live fill from a watched wallet is a real price for that token

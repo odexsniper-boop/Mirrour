@@ -3493,7 +3493,15 @@ const NORMAL_SKIP_RE = /manages exits itself|doesn't copy sells|nothing tracked 
 /** A "not copied" badge: expected skips (rules doing their job) are neutral; real problems stay yellow. */
 function skipBadge(reason) {
   const r = String(reason || 'not copied');
-  const friendly = /nothing tracked to sell/i.test(r) ? "Not held — we never bought this coin" : /top-ups not copied/i.test(r) ? 'Top-up — one copy per trader position' : null;
+  const friendly = /nothing tracked to sell/i.test(r)
+    ? 'Not held — we hold none of this coin'
+    : /first buy was too late/i.test(r)
+      ? 'Missed entry — skipping their top-ups too'
+      : /top-ups not copied/i.test(r)
+        ? 'Top-up — already copied this position'
+        : /price moved too far/i.test(r)
+          ? 'Price ran past your max chase'
+          : null;
   const normal = NORMAL_SKIP_RE.test(r) || /pump-only is on|launchpad-only/i.test(r);
   return `<span class="decision d-skip${normal ? ' is-normal' : ''}" title="${esc(r)}">${normal ? '' : 'Skip · '}${esc(friendly || r)}</span>`;
 }
@@ -4976,7 +4984,7 @@ function pathForState() {
 
 function setTitle(p) {
   const key = p.split('?')[0].split('/').filter(Boolean)[0] || '';
-  document.title = key === 'login' ? 'Log in · odex mirror' : key === 'settings' ? 'Settings · odex mirror' : 'odex mirror';
+  document.title = key === 'login' ? 'Log in · Odex Mirror' : key === 'settings' ? 'Settings · Odex Mirror' : 'Odex Mirror';
 }
 
 function syncUrl(replace = false) {
