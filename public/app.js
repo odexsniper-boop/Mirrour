@@ -882,7 +882,7 @@ function renderDocsView() {
     ['size', 'Size', 'Fixed $, % of balance, or the trader’s own size with a cap.', `${chip(esc(sizing))}${!paper && capSol ? ` ${chip(`max ${capSol} SOL`)}` : ''}`],
     ['verify', 'Verify', 'Price check against the trader’s fill and your slippage.', `${chip(`Max chase ${st.maxChasePct ?? 25}%`)} ${chip(`Buy slip ${st.buySlippagePct?.solana ?? 15}%`)}`],
     ['execute', 'Execute', paper ? 'Paper fill at the live price, with real fees modelled.' : 'Real swap through Jupiter, signed by the bot wallet.', paper ? chip('Paper', 'is-paper') : chip('<span class="dx-dot"></span>Real SOL', 'is-live')],
-    ['exit', 'Exit', autoExit ? 'Hand-off to your auto-exit rules, checked every 2 s.' : f?.mode === 'mirror' ? 'Sells when the trader sells (Mirror).' : 'Held until take-profit / stop-loss.', chip(autoExit ? `${[ti, mt, fl, wc, tc].filter((r) => r.enabled).length}/5 rules on` : f?.mode === 'mirror' ? 'Mirror' : 'Buy & Hold')],
+    ['exit', 'Exit', autoExit ? `Hand-off to your auto-exit rules${f?.mirrorSells ? ', plus a sell the moment the trader sells' : ''}; checked every 0.5 s while a real trade is open (2 s otherwise).` : f?.mode === 'mirror' ? 'Sells when the trader sells (Mirror).' : 'Held until take-profit / stop-loss.', chip(autoExit ? `${[ti, mt, fl, wc, tc].filter((r) => r.enabled).length}/5 rules on` : f?.mode === 'mirror' ? 'Mirror' : 'Buy & Hold')],
   ];
 
   const rules = [
@@ -5611,7 +5611,10 @@ window.onEditFollowMode = function onEditFollowMode() {
   const on = Object.values(f?.exitRules || {}).filter((r) => r && r.enabled).length;
   const hint = document.getElementById('ef-mode-hint');
   hint.className = 'ef-hint';
-  if (mode === 'auto-exit') hint.textContent = on ? `Your ${on} exit rule${on === 1 ? '' : 's'} decide when to sell; the trader's sells are not copied.` : 'No exit rules are on yet — the recommended 5 rules will be switched on when you save.';
+  const mirrorRow = document.getElementById('ef-mirror-sells-row');
+  if (mirrorRow) mirrorRow.hidden = mode !== 'auto-exit';
+  const mirrorSells = mode === 'auto-exit' && Boolean(document.getElementById('ef-mirror-sells')?.checked);
+  if (mode === 'auto-exit') hint.textContent = on ? `Your ${on} exit rule${on === 1 ? '' : 's'} decide when to sell${mirrorSells ? ', and you also sell the moment the trader sells.' : "; the trader's sells are not copied."}` : 'No exit rules are on yet — the recommended 5 rules will be switched on when you save.';
   else if (mode === 'mirror') {
     hint.textContent = "Sells only when the trader sells. If they never sell (or a big sell crashes the price first), nothing protects you — set a stop loss.";
     hint.className = 'ef-hint is-warn';
@@ -5643,6 +5646,8 @@ window.openEditFollowModal = function openEditFollowModal(id) {
   document.getElementById('ef-msg').textContent = '';
   set('ef-max-chase', f.maxChasePct);
   set('ef-topups', f.copyTopUps === true ? 'true' : f.copyTopUps === false ? 'false' : '');
+  const ms = document.getElementById('ef-mirror-sells');
+  if (ms) ms.checked = f.mirrorSells === true;
   syncEditFollowCopyAll();
   onEditFollowSizing();
   onEditFollowMode();
@@ -5684,6 +5689,7 @@ window.saveEditFollow = async function saveEditFollow() {
     filtersOverride: { pumpOnly: pump === '' ? null : pump === 'true' },
     maxChasePct: num('ef-max-chase'),
     copyTopUps: val('ef-topups') === '' ? null : val('ef-topups') === 'true',
+    mirrorSells: Boolean(document.getElementById('ef-mirror-sells')?.checked),
   };
   if (body.maxChasePct !== null && !(body.maxChasePct >= 1)) {
     msg.textContent = 'Max chase must be at least 1% (leave it empty to use the account setting).';
@@ -5832,6 +5838,19 @@ window.syncEditFollowCopyAll = function syncEditFollowCopyAll() {
   document.getElementById('ef-copyall-hint').hidden = !all;
 };
 
+
+// One-click "Follow the trader" preset: sell when they sell + early take profit + wide floor
+window.applyFollowTrader = async function applyFollowTrader() {
+  const id = document.getElementById('edit-follow-id')?.value;
+  if (!id) return;
+  const res = await fetch(`/api/follows/${encodeURIComponent(id)}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ useFollowTrader: true }) });
+  const data = await res.json();
+  if (!data.ok) return showToast(data.error || 'Could not apply the preset.', 'danger');
+  engineState = data.state;
+  renderTerminalAll();
+  closeModal('modal-exit-rules');
+  showToast('Follow the trader applied: sell when they sell, +12% take profit, −40% floor, 5 min cap', 'good');
+};
 
 // One-click "Fast scalp" exit preset (Auto-Exit, every exit sells the whole position)
 window.applyFastScalp = async function applyFastScalp() {

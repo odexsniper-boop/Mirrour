@@ -1067,6 +1067,9 @@
         </div>
       </div>
       <div class="ef-hint" id="ef-mode-hint"></div>
+      <div class="ef-copyall" id="ef-mirror-sells-row">
+        <label class="switch-row"><input type="checkbox" class="rule-toggle" id="ef-mirror-sells" onchange="onEditFollowMode()" /><span><b>Sell when the trader sells</b> — on top of your exit rules (whichever comes first)</span></label>
+      </div>
       <div class="form-row">
         <div class="field">
           <label for="ef-sizing-type">Size each copy by</label>
@@ -1156,6 +1159,10 @@
       <div class="scalp-preset">
         <div><strong>Fast scalp</strong><p>For traders whose coins pump and dump in 1–3 minutes: sell everything at +12%, 15% trailing stop from +8%, −25% floor, close after 3 min.</p></div>
         <button type="button" class="btn btn-primary btn-sm" onclick="applyFastScalp()">Apply Fast scalp</button>
+      </div>
+      <div class="scalp-preset">
+        <div><strong>Follow the trader</strong><p>For skilled fast traders: sell when they sell, take profit at +12%, −40% floor and a 5 min cap only as a safety net. No trailing stop, so normal dips they hold through don't sell you out.</p></div>
+        <button type="button" class="btn btn-primary btn-sm" onclick="applyFollowTrader()">Apply Follow the trader</button>
       </div>
       <div class="form-row" style="margin-bottom:16px;">
         <div class="field">
