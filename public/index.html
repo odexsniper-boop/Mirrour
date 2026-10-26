@@ -155,6 +155,10 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         <span>History</span>
       </button>
+      <button class="nav-tab" data-view="dax" onclick="openDax()" title="Dax — report agent">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="13" rx="3"/><path d="M12 7V3.5"/><circle cx="12" cy="3" r="1"/><circle cx="9" cy="13" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="13" r="1.3" fill="currentColor" stroke="none"/><path d="M9.5 17h5"/></svg>
+        <span>Dax</span>
+      </button>
       <button class="nav-tab" data-view="docs" onclick="switchMainView('docs')">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V3H6.5A2.5 2.5 0 0 0 4 5.5v14z"/><path d="M20 17v4H6.5A2.5 2.5 0 0 1 4 19.5"/></svg>
         <span>Docs</span>
@@ -955,6 +959,42 @@
     <!-- ===================================================================== -->
     <!-- VIEW 5: DOCS                                                          -->
     <!-- ===================================================================== -->
+    <section id="view-dax" class="page-view">
+      <div class="page-head dax-head">
+        <div class="dax-id">
+          <span class="dax-avatar" aria-hidden="true"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="7" width="16" height="13" rx="3"/><path d="M12 7V3.5"/><circle cx="12" cy="3" r="1"/><circle cx="9" cy="13" r="1.3" fill="currentColor" stroke="none"/><circle cx="15" cy="13" r="1.3" fill="currentColor" stroke="none"/><path d="M9.5 17h5"/></svg></span>
+          <div>
+            <h1 class="page-title">Dax</h1>
+            <p class="page-sub">Your report agent. Dax reads every trade, skip, exit and order the bot made and writes one report — paste it to Claude instead of sharing screenshots.</p>
+          </div>
+        </div>
+      </div>
+      <div class="card dax-controls">
+        <div class="seg" id="dax-period" role="group" aria-label="Report period">
+          <button type="button" class="seg-btn" data-p="today" onclick="loadDax('today')">Today</button>
+          <button type="button" class="seg-btn active" data-p="24h" onclick="loadDax('24h')">24 hours</button>
+          <button type="button" class="seg-btn" data-p="7d" onclick="loadDax('7d')">7 days</button>
+          <button type="button" class="seg-btn" data-p="all" onclick="loadDax('all')">All</button>
+        </div>
+        <div class="dax-actions">
+          <button type="button" class="btn btn-primary btn-sm" onclick="copyDaxReport()">Copy report for Claude</button>
+          <button type="button" class="btn btn-sm" onclick="downloadDaxReport()">Download .md</button>
+          <button type="button" class="btn btn-sm" id="dax-send" onclick="sendDaxReport()">Send to Telegram / Discord</button>
+          <button type="button" class="btn btn-sm" onclick="loadDax()" title="Write the report again with the latest trades">Refresh</button>
+        </div>
+        <div class="dax-daily">
+          <label class="switch-row"><input type="checkbox" class="rule-toggle" id="dax-daily" onchange="saveDaxDaily()" /><span><b>Daily report</b> to Telegram / Discord at</span></label>
+          <select id="dax-hour" class="input dax-hour" onchange="saveDaxDaily()"></select>
+          <span class="muted" id="dax-daily-note"></span>
+        </div>
+      </div>
+      <div class="dax-findings" id="dax-findings"></div>
+      <div class="card dax-report-card">
+        <div class="dax-report-meta muted" id="dax-meta">Dax is writing the report…</div>
+        <div class="dax-report" id="dax-report"></div>
+      </div>
+    </section>
+
     <section id="view-docs" class="page-view">
       <div class="page-head">
         <div>

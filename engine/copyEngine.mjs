@@ -503,6 +503,35 @@ export class CopyTradingEngine {
     }
   }
 
+  /**
+   * Dax's trader log: every buy / sell a followed trader made, with their price and whether each
+   * follow copied it (and why not). Kept 7 days (max 6000 rows), saved with the engine, so the
+   * trader's own result per coin and the missed trades can be reported later.
+   */
+  logTraderTrade(sig, outcomes = []) {
+    if (!sig || sig.backfill || !sig.tokenMint) return;
+    if (!Array.isArray(this.traderLog)) this.traderLog = [];
+    const t = Number(sig.detectedAt) || Date.now();
+    if (t < Date.now() - 7 * 24 * 3600_000) return; // older than the 7 days kept
+    this.traderLog.push({
+      t,
+      w: sig.wallet,
+      mint: sig.tokenMint,
+      sym: sig.symbol || null,
+      side: sig.side,
+      px: Number(sig.txPriceUsd) || null,
+      usd: Number(sig.usdValue) || null,
+      share: sig.side === 'sell' ? Number(sig.sellSharePct) || null : null,
+      mc: Number(sig.marketCapUsd) || null,
+      lag: Number.isFinite(Number(sig.latencySec)) ? Number(sig.latencySec) : null,
+      copies: outcomes.map((o) => ({ fid: o.followId, ok: Boolean(o.ok), dry: Boolean(o.dry), reason: o.reason ? String(o.reason).slice(0, 160) : null })),
+    });
+    const since = Date.now() - 7 * 24 * 3600_000;
+    if (this.traderLog.length > 6000 || (this.traderLog[0] && this.traderLog[0].t < since)) {
+      this.traderLog = this.traderLog.filter((e) => e.t >= since).slice(-6000);
+    }
+  }
+
   /** Real SOL this trader's copies spent (or are spending right now) in the last 24 h. */
   traderRealSpent24hSol(follow) {
     const since = Date.now() - 24 * 3600_000;

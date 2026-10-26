@@ -18,6 +18,7 @@ import fsSync from 'node:fs';
 import zlib from 'node:zlib';
 import { RealTrader } from './engine/realTrader.mjs';
 import { Notifier } from './engine/notifier.mjs';
+import { buildDaxReport } from './engine/dax.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -265,6 +266,41 @@ function logPaperFunding(w, type, beforeUsd) {
   w.paperLedger.unshift({ t: Date.now(), type, beforeUsd: before, afterUsd: after, changeUsd: Number((after - before).toFixed(2)) });
   if (w.paperLedger.length > 200) w.paperLedger.length = 200;
 }
+
+// ---------------------------------------------------------------------------
+// Dax, the report agent
+// ---------------------------------------------------------------------------
+function daxSettings() {
+  const d = engine.settings.dax && typeof engine.settings.dax === 'object' ? engine.settings.dax : {};
+  return { daily: Boolean(d.daily), hourUtc: Number.isInteger(d.hourUtc) ? d.hourUtc : 8, lastDailyDay: d.lastDailyDay || null };
+}
+function daxPublicSettings() {
+  const d = daxSettings();
+  const c = notifier.cfg();
+  return { ...d, telegram: Boolean(c.telegram.enabled), discord: Boolean(c.discord.enabled) };
+}
+function daxReport(period) {
+  return buildDaxReport({ engine, realTrader, live: liveSignals, extra: { region: process.env.RAILWAY_REPLICA_REGION || null, version: process.env.RAILWAY_GIT_COMMIT_SHA || null } }, { period });
+}
+function daxFilename(rep) {
+  return `dax-report-${rep.period.preset}-${new Date(rep.generatedAt).toISOString().slice(0, 16).replace(/[:T]/g, '-')}.md`;
+}
+// Daily report to Telegram / Discord at the chosen UTC hour (once a day, only on the trading copy)
+setInterval(async () => {
+  try {
+    const d = daxSettings();
+    if (!d.daily || shuttingDownFlag || otherInstance) return; // the standby copy never sends
+    const now = new Date();
+    const day = now.toISOString().slice(0, 10);
+    if (now.getUTCHours() !== d.hourUtc || d.lastDailyDay === day) return;
+    engine.settings.dax = { ...d, lastDailyDay: day };
+    engine.emit('settings_updated', {});
+    const rep = daxReport('24h');
+    await notifier.sendReport({ summary: rep.summaryText, markdown: rep.markdown, filename: daxFilename(rep) });
+  } catch (err) {
+    console.error(`Dax daily report failed: ${redact(err?.message || String(err), alchemy.apiKey)}`);
+  }
+}, 60_000).unref?.();
 
 let autoTickEnabled = true;
 // Ticks may overlap (a real sell can take seconds) but never pile up; an error in one tick is
@@ -740,6 +776,38 @@ export const server = http.createServer(async (req, res) => {
       engine.settings.realCaps = Object.keys(next).length ? next : null;
       engine.emit('settings_updated', {}); // saves (database + Supabase)
       return sendJson(res, 200, { ok: true, ...realTrader.status(), state: engine.getStateSnapshot() });
+    }
+    // Dax, the report agent: one report of every trade section for a period (password protected)
+    if (req.method === 'GET' && pathname === '/api/dax/report') {
+      const period = ['today', '24h', '7d', 'all'].includes(url.searchParams.get('period')) ? url.searchParams.get('period') : '24h';
+      const rep = daxReport(period);
+      if (url.searchParams.get('format') === 'md') {
+        res.writeHead(200, { 'Content-Type': 'text/markdown; charset=utf-8', 'Content-Disposition': `inline; filename="${daxFilename(rep)}"`, 'Cache-Control': 'no-store' });
+        return res.end(rep.markdown);
+      }
+      return sendJson(res, 200, { ok: true, period: rep.period, generatedAt: rep.generatedAt, findings: rep.findings, markdown: rep.markdown, summaryText: rep.summaryText, dax: daxPublicSettings() });
+    }
+    if (req.method === 'POST' && pathname === '/api/dax/send') {
+      const body = await readJsonBody(req);
+      const period = ['today', '24h', '7d', 'all'].includes(body.period) ? body.period : '24h';
+      const rep = daxReport(period);
+      const sent = await notifier.sendReport({ summary: rep.summaryText, markdown: rep.markdown, filename: daxFilename(rep) }, body.to || null);
+      const anyApp = sent.telegram !== null || sent.discord !== null;
+      if (!anyApp) return sendJson(res, 400, { ok: false, error: 'Connect Telegram or Discord first (Settings → Integrations).' });
+      return sendJson(res, 200, { ok: Boolean(sent.telegram || sent.discord), sent });
+    }
+    if (req.method === 'POST' && pathname === '/api/dax/settings') {
+      const body = await readJsonBody(req);
+      const cur = daxSettings();
+      if (body.daily !== undefined) cur.daily = Boolean(body.daily);
+      if (body.hourUtc !== undefined) {
+        const h = Number(body.hourUtc);
+        if (!(Number.isInteger(h) && h >= 0 && h <= 23)) return sendJson(res, 400, { ok: false, error: 'Hour must be 0–23 (UTC).' });
+        cur.hourUtc = h;
+      }
+      engine.settings.dax = cur;
+      engine.emit('settings_updated', {});
+      return sendJson(res, 200, { ok: true, dax: daxPublicSettings() });
     }
     if (req.method === 'POST' && pathname === '/api/real/test') {
       const r = await realTrader.selfTest();

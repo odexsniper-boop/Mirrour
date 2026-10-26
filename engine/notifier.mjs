@@ -155,6 +155,35 @@ export class Notifier {
     return r.ok;
   }
 
+  /**
+   * Dax report: a short summary message plus the full report as a .md file, to every connected
+   * app (or just one). Returns { telegram, discord } (true / false / null = not connected).
+   */
+  async sendReport({ summary, markdown, filename = 'dax-report.md' }, only = null) {
+    const c = this.cfg();
+    const out = { telegram: null, discord: null };
+    const want = (ch) => (!only || only === ch || only === 'both') && c[ch].enabled;
+    if (want('telegram')) {
+      const fd = new FormData();
+      fd.append('chat_id', String(c.telegram.chatId));
+      fd.append('caption', String(summary).slice(0, 1000));
+      fd.append('document', new Blob([markdown], { type: 'text/markdown' }), filename);
+      const r = await this.http(`https://api.telegram.org/bot${c.telegram.botToken}/sendDocument`, { method: 'POST', body: fd });
+      // a caption over Telegram's limit or a refused file: fall back to the summary as a message
+      out.telegram = r.ok ? true : await this.sendTelegram(escHtml(String(summary).slice(0, 3900)));
+      if (r.ok) this.mark('telegram', true);
+    }
+    if (want('discord')) {
+      const fd = new FormData();
+      fd.append('payload_json', JSON.stringify({ username: 'Dax · Odex Mirror', content: String(summary).slice(0, 1900) }));
+      fd.append('files[0]', new Blob([markdown], { type: 'text/markdown' }), filename);
+      const r = await this.http(c.discord.webhookUrl, { method: 'POST', body: fd });
+      out.discord = Boolean(r.ok);
+      this.mark('discord', r.ok, r.description || (r.ok ? null : 'Discord refused the report'));
+    }
+    return out;
+  }
+
   mark(ch, ok, err) {
     const s = this.status[ch];
     if (ok) {

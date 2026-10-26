@@ -22,6 +22,7 @@ export function serializeEngine(engine) {
     settings: engine.settings,
     buyCooldown: [...engine.buyCooldownMap.entries()],
     copiedCycles: engine.copiedCycles || {},
+    traderLog: (engine.traderLog || []).slice(-6000), // Dax: trader buys/sells + copy outcome (7 days)
   };
 }
 
@@ -41,6 +42,7 @@ export function restoreEngine(engine, data) {
   }
   if (Array.isArray(data.alerts)) engine.alerts = data.alerts;
   if (data.copiedCycles && typeof data.copiedCycles === 'object') engine.copiedCycles = { ...data.copiedCycles };
+  if (Array.isArray(data.traderLog)) engine.traderLog = data.traderLog;
   if (data.settings && typeof data.settings === 'object') {
     // Merge so settings added in newer versions keep their defaults
     const merged = { ...engine.settings, ...data.settings };

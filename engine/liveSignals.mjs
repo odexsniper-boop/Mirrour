@@ -306,6 +306,18 @@ export class LiveSignalService {
       record.paperCopied = record.copies.some((c) => c.ok);
     }
 
+    // Dax's trader log: what the trader did and what each follow did about it
+    if (!sig.backfill && typeof this.engine.logTraderTrade === 'function') {
+      try {
+        const outcomes = record.copies
+          ? record.copies.map((c) => ({ followId: c.followId, ok: c.ok, reason: c.reason || (c.ok ? null : c.status) }))
+          : (record.decisions || []).filter((d) => d.followId).map((d) => ({ followId: d.followId, ok: d.status === 'would_copy', dry: true, reason: d.reason || null }));
+        this.engine.logTraderTrade(sig, outcomes);
+      } catch {
+        // reporting only: never disturb copying
+      }
+    }
+
     this.signals.unshift(record);
     if (this.signals.length > MAX_SIGNALS) this.signals.length = MAX_SIGNALS;
     this.broadcast({ event: 'live_signal', data: record, liveWatch: this.snapshot(false) });

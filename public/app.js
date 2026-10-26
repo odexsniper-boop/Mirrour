@@ -3807,6 +3807,7 @@ const SEARCH_PAGES = [
   { title: 'Wallets', sub: 'Solana wallet, balance, receive, swap', keys: 'wallets balance receive deposit swap solana phantom', go: () => goTerminalTab('wallets') },
   { title: 'History', sub: '7-day fills and skips', keys: 'history receipts skips log', go: () => goTerminalTab('history') },
   { title: 'Docs', sub: 'How the engine works', keys: 'docs help engine spec rules', go: () => switchMainView('docs') },
+  { title: 'Dax', sub: 'Trade report agent', keys: 'dax report agent analysis summary claude', go: () => openDax() },
   { title: 'Deposit', sub: 'Add funds to the active wallet', keys: 'deposit fund add sol', go: () => openDepositModal() },
   { title: 'Copy a trader', sub: 'Open the copy dialog', keys: 'copy follow new trader add', go: () => openQuickCopyModal() },
 ];
@@ -5058,13 +5059,14 @@ let lastHomeTab = 'positions';
 
 function pathForState() {
   if (!getSession()) return '/login';
+  if (document.getElementById('view-dax')?.classList.contains('active')) return '/dax';
   if (currentTermTab === 'config' && !document.getElementById('view-docs')?.classList.contains('active')) return '/settings';
   return '/';
 }
 
 function setTitle(p) {
   const key = p.split('?')[0].split('/').filter(Boolean)[0] || '';
-  document.title = key === 'login' ? 'Log in · Odex Mirror' : key === 'settings' ? 'Settings · Odex Mirror' : 'Odex Mirror';
+  document.title = key === 'login' ? 'Log in · Odex Mirror' : key === 'settings' ? 'Settings · Odex Mirror' : key === 'dax' ? 'Dax · Odex Mirror' : 'Odex Mirror';
 }
 
 function syncUrl(replace = false) {
@@ -5109,6 +5111,7 @@ function applyRoute(pathname, push = false) {
       openSettingsSection('copytrades');
     } else if (TERMINAL_ROUTES.includes(a)) goTerminalTab(a); // old link
     else if (a === 'docs') switchMainView('docs'); // old link
+    else if (a === 'dax') openDax();
     else goTerminalTab(lastHomeTab || 'positions'); // "/" (Back from Settings returns to the tab you were on)
   } finally {
     routeApplying = false;
@@ -5979,4 +5982,167 @@ window.applyFastScalp = async function applyFastScalp() {
   renderTerminalAll();
   closeModal('modal-exit-rules');
   showToast('Fast scalp applied: Auto-Exit, +12% take profit, 15% trail, −25% floor, 3 min cap', 'good');
+};
+
+
+// ============================================================================
+// Dax, the report agent: one report of every trade section, ready to paste to Claude
+// ============================================================================
+const dax = { period: '24h', report: null, loading: false, settings: null };
+try {
+  const p = localStorage.getItem('odex.daxPeriod');
+  if (['today', '24h', '7d', 'all'].includes(p)) dax.period = p;
+} catch {
+  // storage unavailable
+}
+
+window.openDax = function openDax() {
+  switchMainView('dax');
+  loadDax();
+};
+
+/** Small, safe Markdown → HTML (headings, lists, tables, code, bold, italics) for Dax's report. */
+function daxMarkdownHtml(md) {
+  const inline = (t) => esc(t).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/(^|\s)_(.+?)_(?=\s|$)/g, '$1<i>$2</i>');
+  const out = [];
+  const lines = String(md || '').split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    if (l.startsWith('```')) {
+      const code = [];
+      for (i += 1; i < lines.length && !lines[i].startsWith('```'); i++) code.push(lines[i]);
+      out.push(`<pre>${esc(code.join('\n'))}</pre>`);
+    } else if (l.startsWith('|')) {
+      const rows = [];
+      for (; i < lines.length && lines[i].startsWith('|'); i++) rows.push(lines[i]);
+      i -= 1;
+      const cells = (r) => r.replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+      const body = rows.filter((r, k) => k !== 1 || !/^\|[\s|:-]+\|$/.test(r));
+      out.push(`<table><thead><tr>${cells(body[0]).map((c) => `<th>${inline(c)}</th>`).join('')}</tr></thead><tbody>${body.slice(1).map((r) => `<tr>${cells(r).map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`);
+    } else if (l.startsWith('- ')) {
+      const items = [];
+      for (; i < lines.length && lines[i].startsWith('- '); i++) items.push(`<li>${inline(lines[i].slice(2))}</li>`);
+      i -= 1;
+      out.push(`<ul>${items.join('')}</ul>`);
+    } else if (/^#{1,3} /.test(l)) {
+      const n = l.match(/^#+/)[0].length;
+      out.push(`<h${n}>${inline(l.slice(n + 1))}</h${n}>`);
+    } else if (l.trim()) out.push(`<p>${inline(l)}</p>`);
+  }
+  return out.join('');
+}
+
+window.loadDax = async function loadDax(period) {
+  if (period) {
+    dax.period = period;
+    try {
+      localStorage.setItem('odex.daxPeriod', period);
+    } catch {
+      // ignore
+    }
+  }
+  document.querySelectorAll('#dax-period .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.p === dax.period));
+  const meta = document.getElementById('dax-meta');
+  if (meta) meta.textContent = 'Dax is writing the report…';
+  dax.loading = true;
+  try {
+    const d = await (await fetch(`/api/dax/report?period=${encodeURIComponent(dax.period)}`, { cache: 'no-store' })).json();
+    if (!d.ok) throw new Error(d.error || 'report failed');
+    dax.report = d;
+    dax.settings = d.dax || null;
+    renderDax();
+  } catch (err) {
+    if (meta) meta.textContent = `Dax could not write the report: ${err.message}`;
+  } finally {
+    dax.loading = false;
+  }
+};
+
+function renderDax() {
+  const r = dax.report;
+  if (!r) return;
+  const tone = { bad: 'bad', warn: 'warn', good: 'good' };
+  const f = document.getElementById('dax-findings');
+  if (f) f.innerHTML = (r.findings || []).map((x) => `<div class="dax-find ${tone[x.level] || ''}"><i></i><span>${esc(x.text)}</span></div>`).join('');
+  const meta = document.getElementById('dax-meta');
+  if (meta) meta.textContent = `${r.period.label} · written ${new Date(r.generatedAt).toLocaleString()} · ${r.markdown.length.toLocaleString()} characters`;
+  const rep = document.getElementById('dax-report');
+  if (rep) rep.innerHTML = daxMarkdownHtml(r.markdown.replace(/^## Dax's findings[\s\S]*?(?=\n## )/m, ''));
+  // daily report settings
+  const s = dax.settings;
+  const hour = document.getElementById('dax-hour');
+  if (hour && !hour.options.length) hour.innerHTML = Array.from({ length: 24 }, (_, h) => `<option value="${h}">${String(h).padStart(2, '0')}:00 UTC</option>`).join('');
+  if (s) {
+    const cb = document.getElementById('dax-daily');
+    if (cb) cb.checked = Boolean(s.daily);
+    if (hour) hour.value = String(s.hourUtc ?? 8);
+    const note = document.getElementById('dax-daily-note');
+    if (note) note.textContent = s.telegram || s.discord ? `→ ${[s.telegram ? 'Telegram' : null, s.discord ? 'Discord' : null].filter(Boolean).join(' + ')}` : '(connect Telegram or Discord in Settings → Integrations)';
+    const send = document.getElementById('dax-send');
+    if (send) send.disabled = !(s.telegram || s.discord);
+  }
+}
+
+window.copyDaxReport = async function copyDaxReport() {
+  if (!dax.report) await loadDax();
+  if (!dax.report) return;
+  try {
+    await navigator.clipboard.writeText(dax.report.markdown);
+    showToast('Dax report copied — paste it into your chat with Claude', 'good');
+  } catch {
+    // clipboard blocked: select the text instead
+    const ta = document.createElement('textarea');
+    ta.value = dax.report.markdown;
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+      showToast('Dax report copied', 'good');
+    } catch {
+      showToast('Could not copy — use Download .md instead', 'danger');
+    }
+    ta.remove();
+  }
+};
+
+window.downloadDaxReport = function downloadDaxReport() {
+  if (!dax.report) return;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([dax.report.markdown], { type: 'text/markdown' }));
+  a.download = `dax-report-${dax.period}-${new Date(dax.report.generatedAt).toISOString().slice(0, 16).replace(/[:T]/g, '-')}.md`;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(a.href);
+    a.remove();
+  }, 0);
+};
+
+window.sendDaxReport = async function sendDaxReport() {
+  const btn = document.getElementById('dax-send');
+  if (btn) btn.disabled = true;
+  try {
+    const d = await (await fetch('/api/dax/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ period: dax.period }) })).json();
+    if (!d.ok) return showToast(d.error || 'Dax could not send the report', 'danger');
+    const to = [d.sent?.telegram ? 'Telegram' : null, d.sent?.discord ? 'Discord' : null].filter(Boolean).join(' + ');
+    showToast(`Dax sent the report to ${to}`, 'good');
+  } catch {
+    showToast('Dax could not send the report', 'danger');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+};
+
+window.saveDaxDaily = async function saveDaxDaily() {
+  const daily = Boolean(document.getElementById('dax-daily')?.checked);
+  const hourUtc = Number(document.getElementById('dax-hour')?.value || 8);
+  try {
+    const d = await (await fetch('/api/dax/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ daily, hourUtc }) })).json();
+    if (!d.ok) return showToast(d.error || 'Could not save', 'danger');
+    dax.settings = d.dax;
+    renderDax();
+    showToast(daily ? `Dax will send the last 24 h report every day at ${String(hourUtc).padStart(2, '0')}:00 UTC` : 'Daily Dax report off', 'good');
+  } catch {
+    showToast('Could not save the daily report setting', 'danger');
+  }
 };
