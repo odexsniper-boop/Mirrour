@@ -11,6 +11,13 @@
 
 import { WalletStream, looksLikeSwap, toWsUrl } from './walletStream.mjs';
 import { TokenAccountStream } from './tokenStream.mjs';
+
+/** Every pump.fun coin has exactly 1 billion tokens. */
+export const PUMP_SUPPLY = 1_000_000_000;
+/** A pump.fun coin traded on pump.fun's own curve or its PumpSwap pool. */
+export function isPumpFunCoin(swap) {
+  return Boolean(swap && /pump$/.test(String(swap.tokenMint || '')) && (swap.venue === 'pumpfun' || swap.venue === 'pumpswap'));
+}
 import { bondingCurvePda } from './pumpCurve.mjs';
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 export const QUOTE_MINTS = {
@@ -436,6 +443,7 @@ export class SolanaWalletWatcher {
     // Token details (name, logo, market data) may wait this long before a trade is passed on
     // for copying; whatever arrives later is filled in afterwards (onTokenInfoLate)
     this.tokenInfoBudgetMs = Number(process.env.ODEX_TOKEN_INFO_BUDGET_MS ?? 1200);
+    this.pumpInfoBudgetMs = Number(process.env.ODEX_PUMP_INFO_BUDGET_MS ?? 150);
     this.onTokenInfoLate = null;
     this.rpcTimes = [];
     this.emittedSigs = new Map(); // signature → token mint, for trades that became signals
@@ -855,18 +863,22 @@ export class SolanaWalletWatcher {
     // Copy speed: token details from DexScreener / Alchemy can take many seconds for a brand-new
     // coin. Wait at most tokenInfoBudgetMs, then pass the trade on with the trader's own
     // on-chain price; the details are filled in when they arrive.
+    // pump.fun coins are all alike: 1 billion supply, mint and freeze authority revoked. Their
+    // details are not worth waiting for: market cap comes from the trader's own fill price.
+    const pumpCoin = isPumpFunCoin(swap);
+    const budgetMs = pumpCoin ? Math.min(this.tokenInfoBudgetMs, this.pumpInfoBudgetMs) : this.tokenInfoBudgetMs;
     const infoPromise = this.tokenInfo.get(swap.tokenMint);
     let infoLate = false;
     let budgetTimer = null;
     const [info, solPrice] = await Promise.all([
-      this.tokenInfoBudgetMs > 0
+      budgetMs > 0
         ? Promise.race([
             infoPromise,
             new Promise((resolve) => {
               budgetTimer = setTimeout(() => {
                 infoLate = true;
                 resolve(null);
-              }, this.tokenInfoBudgetMs);
+              }, budgetMs);
               budgetTimer.unref?.();
             }),
           ])
@@ -882,6 +894,7 @@ export class SolanaWalletWatcher {
     const quoteUsd = swap.quoteSymbol === 'SOL' ? solPrice : 1;
     const usdValue = swap.quoteAmount * quoteUsd;
     const txPriceUsd = swap.priceInQuote * quoteUsd;
+    const pumpFallback = pumpCoin && !info?.marketCapUsd && txPriceUsd > 0;
 
     const signal = {
       id: `sig-${sig.slice(0, 12)}`,
@@ -899,15 +912,15 @@ export class SolanaWalletWatcher {
       usdValue,
       txPriceUsd,
       currentPriceUsd: info?.priceUsd || null,
-      marketCapUsd: info?.marketCapUsd || null,
+      marketCapUsd: info?.marketCapUsd || (pumpFallback ? txPriceUsd * PUMP_SUPPLY : null),
       liquidityUsd: info?.liquidityUsd || null,
       dexId: info?.dexId || null,
       pairCreatedAt: info?.pairCreatedAt || null,
       pairUrl: info?.pairUrl || null,
       imageUrl: info?.imageUrl || null,
-      authorityKnown: Boolean(info?.authorityKnown),
-      mintAuthority: info?.mintAuthority ?? null,
-      freezeAuthority: info?.freezeAuthority ?? null,
+      authorityKnown: Boolean(info?.authorityKnown) || pumpCoin,
+      mintAuthority: info?.authorityKnown ? info.mintAuthority ?? null : null,
+      freezeAuthority: info?.authorityKnown ? info.freezeAuthority ?? null : null,
       venue: swap.venue || null,
       poolQuoteAmount: swap.poolQuoteAmount ?? null,
       signature: sig,
