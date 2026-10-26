@@ -114,6 +114,7 @@ export const PAPER_SOLANA_FEES = {
   jupiterNewTokenPct: 0.5,
   jupiterPct: 0.1,
   tokenAccountRentSol: 0.00203928,
+  realSwapNetworkSol: 0.00003, // base fee + Jupiter's own priority/landing fee, per swap (measured)
 };
 
 export function solanaTradeFeePct(token = {}, now = Date.now()) {
@@ -293,12 +294,10 @@ export class ChainExecutionAdapter {
     let networkFeeUsd = 0;
     if (!gasless && chain) {
       if (chainId === 'solana') {
-        const preset = PRIORITY_FEE_PRESETS[priorityFee?.mode || 'normal'] || PRIORITY_FEE_PRESETS.normal;
-        const solFee =
-          priorityFee?.mode === 'custom'
-            ? Number(priorityFee.customSol || 0.001)
-            : preset.solanaSol;
-        networkFeeUsd = (0.000005 + solFee) * chain.nativePriceUsd;
+        // Real swaps go through Jupiter, which sets its own priority fee (the Priority Fee setting is
+        // not used), so paper charges what real swaps actually paid: measured on the bot wallet at
+        // about 0.000006–0.00003 SOL per swap. Token-account rent on a first buy is added separately.
+        networkFeeUsd = PAPER_SOLANA_FEES.realSwapNetworkSol * chain.nativePriceUsd;
       } else if (chainId === 'bsc') {
         const mult = (PRIORITY_FEE_PRESETS[priorityFee?.mode || 'normal'] || PRIORITY_FEE_PRESETS.normal).evmMultiplier;
         networkFeeUsd = 0.08 * mult;

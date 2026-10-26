@@ -74,7 +74,8 @@ test('open PnL subtracts the fees selling now would cost', async () => {
   await e.processTraderSignal(sig(f, { address: 'openMint', traderFillPriceUsd: 0.00002, currentPriceUsd: 0.00002 }));
   const s = e.getStateSnapshot();
   const p = s.positions[0];
-  assert.ok(Math.abs(p.exitFeesUsd - (p.valueUsd * 0.0075 + 0.0002 * 185 + 0.000005 * 185)) < 0.02, `exit fees ${p.exitFeesUsd}`);
+  // network part = what a real Jupiter swap pays (~0.00003 SOL), not the Priority Fee preset
+  assert.ok(Math.abs(p.exitFeesUsd - (p.valueUsd * 0.0075 + 0.00003 * 185)) < 0.02, `exit fees ${p.exitFeesUsd}`);
   assert.ok(Math.abs(p.unrealizedPnlUsd - (p.valueUsd - p.exitFeesUsd - p.remainingCostUsd)) <= 0.02);
   assert.ok(Math.abs(s.positionsSummary.unrealizedPnlUsd - p.unrealizedPnlUsd) <= 0.02);
 });
