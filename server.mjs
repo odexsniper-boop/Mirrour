@@ -1327,10 +1327,6 @@ export const server = http.createServer(async (req, res) => {
       }
     }
 
-    if (pathname === '/api/integrations' && req.method === 'GET') {
-      return sendJson(res, 200, { ok: true, alchemy: alchemy.status() });
-    }
-
     // 9.6 Live wallet signals (signals only)
     if (pathname === '/api/signals' && req.method === 'GET') {
       return sendJson(res, 200, { ok: true, ...liveSignals.snapshot(true) });
