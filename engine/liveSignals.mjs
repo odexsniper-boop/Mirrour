@@ -272,22 +272,18 @@ export class LiveSignalService {
         // cosmetic only
       }
     }
-    // Copies run on paper (Paper Trading ON) or for real (Paper Trading OFF + bot wallet key set)
-    const copying = this.engine.settings.paperTrading || (typeof this.engine.realTradingActive === 'function' && this.engine.realTradingActive());
-    const follows = this.engine.follows.filter((f) => f.chainId === 'solana' && f.traderWallet === sig.wallet);
-    const willCopy = Boolean(this.config.paperCopy && copying && !sig.backfill && follows.length);
-    // Copy speed: the dry-run "would copy / skip" preview is only shown when nothing is copied.
-    // When a copy runs it would cost a whole extra Jupiter quote BEFORE the real buy, so it is
-    // skipped and the feed shows the real copy result instead.
-    const record = { ...sig, decisions: willCopy ? [] : await this.decide(sig), paperCopied: false };
+    const record = { ...sig, decisions: await this.decide(sig), paperCopied: false };
 
     // Every live fill from a watched wallet is a real price for that token
     if (!sig.backfill && typeof this.engine.observeTradePrice === 'function') {
       this.engine.observeTradePrice(sig.tokenMint, sig.txPriceUsd, sig.blockTime || Date.now());
     }
 
-    if (willCopy) {
+    // Copies run on paper (Paper Trading ON) or for real (Paper Trading OFF + bot wallet key set)
+    const copying = this.engine.settings.paperTrading || (typeof this.engine.realTradingActive === 'function' && this.engine.realTradingActive());
+    if (this.config.paperCopy && copying && !sig.backfill) {
       // Each follow is matched by WALLET only and copies with its own settings
+      const follows = this.engine.follows.filter((f) => f.chainId === 'solana' && f.traderWallet === sig.wallet);
       record.copies = [];
       for (const f of follows) {
         const es = this.toEngineSignal(sig, f);
@@ -298,10 +294,7 @@ export class LiveSignalService {
           r = { status: 'error', reason: err.message };
         }
         const ok = r?.status === 'filled' || r?.ok === true;
-        // copy speed, measured: signal ready → copy finished (includes the swap for real copies)
-        const handledMs = sig.detectedAt ? Date.now() - sig.detectedAt : null;
-        record.copies.push({ followId: f.id, handle: f.handle, ok, status: r?.status || null, reason: r?.reason || null, handledMs });
-        record.decisions.push({ followId: f.id, handle: f.handle, followStatus: f.status, status: ok ? 'copied' : r?.status || null, reason: r?.reason || null, sizeUsd: null, chaseGapPct: r?.chaseGapPct ?? null });
+        record.copies.push({ followId: f.id, handle: f.handle, ok, status: r?.status || null, reason: r?.reason || null });
       }
       record.paperCopied = record.copies.some((c) => c.ok);
     }

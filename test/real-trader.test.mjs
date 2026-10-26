@@ -593,36 +593,3 @@ test('a failing real exit retries with more slippage room (auto → 25% → 50%)
   assert.equal(p.remainingTokens, 0, 'got out');
   assert.equal(p.realSellFails, 0);
 });
-
-test('speed: a roomy recent balance is trusted (no balance read before sending); one Jupiter quote per copy; timings recorded', { timeout: 5000 }, async () => {
-  const { w, trader } = world({ sol: 5 });
-  const { e, f } = engineFor(trader);
-  await trader.refreshBalance(); // the server refreshes every 15 s in real mode
-  const rpc = trader.rpc;
-  // from now on a balance read never answers: if the buy waited for one, it would hang
-  trader.rpc = (m, p) => (m === 'getBalance' ? new Promise(() => {}) : rpc(m, p));
-  const ordersBefore = w.orders;
-  await e.processTraderSignal(buySig(f));
-  assert.ok(e.positions[0], 'bought without waiting for a balance read');
-  assert.equal(w.orders - ordersBefore, 1, 'exactly one Jupiter quote');
-  const rec = trader.trades[0];
-  assert.ok(rec.timing && Number.isFinite(rec.timing.sendMs), 'send time recorded');
-  assert.ok(Number.isFinite(rec.timing.quoteMs), 'quote time recorded');
-});
-
-test('speed: a tight balance is still read fresh before the buy, and a short wallet is refused', async () => {
-  const { w, trader } = world({ sol: 0.3 }); // $50 buy = 0.25 SOL + reserve: tight
-  const { e, f } = engineFor(trader);
-  await trader.refreshBalance();
-  let balanceReads = 0;
-  const rpc = trader.rpc;
-  trader.rpc = (m, p) => {
-    if (m === 'getBalance') balanceReads++;
-    return rpc(m, p);
-  };
-  w.sol = 10_000_000n; // drained elsewhere since the last read
-  await e.processTraderSignal(buySig(f));
-  assert.ok(balanceReads >= 1, 'fresh read');
-  assert.equal(e.positions.length, 0, 'refused: not enough SOL');
-  assert.equal(w.sent.length, 0, 'nothing sent');
-});

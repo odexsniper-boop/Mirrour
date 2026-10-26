@@ -472,27 +472,3 @@ test('L-pool: the trader price comes from the SOL that reached the pool, not fee
   assert.ok(Math.abs(s.priceInQuote - 0.0195 / tokens) < 1e-15, 'price from the pool leg');
   assert.ok(s.quoteAmount > 0.03, 'what the trader spent (minus the refundable deposit) is still reported');
 });
-
-test('L-speed2: no dry-run preview (and no extra quote) when a copy runs; the feed shows the real result', async () => {
-  const ctx = setup();
-  await ctx.watcher.pollOnce(); // catch-up
-  let dry = 0;
-  const orig = ctx.live.decide.bind(ctx.live);
-  ctx.live.decide = async (s) => {
-    dry++;
-    return orig(s);
-  };
-  ctx.swap('d1', WALLET, 'buy');
-  await ctx.watcher.pollOnce();
-  const rec = ctx.live.signals.find((s) => s.signature === 'd1');
-  assert.equal(dry, 0, 'dry run skipped when copying');
-  assert.ok(rec.copies[0].ok, 'copied');
-  assert.equal(rec.decisions[0].status, 'copied');
-  assert.ok(Number.isFinite(rec.copies[0].handledMs), 'copy time measured');
-  // copying switched off: the preview is still shown
-  ctx.live.config.paperCopy = false;
-  ctx.swap('d2', WALLET, 'buy');
-  await ctx.watcher.pollOnce();
-  assert.equal(dry, 1, 'dry-run preview when nothing is copied');
-  assert.ok(ctx.live.signals.find((s) => s.signature === 'd2').decisions.length);
-});
