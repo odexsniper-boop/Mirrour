@@ -481,11 +481,38 @@ export class CopyTradingEngine {
       });
     }
     this.buysInFlight.add(key);
+    const spend = { entry: null }; // this buy's reservation against the trader's daily SOL limit
     try {
-      return await this.handleLeaderBuySignalNow(follow, signal, opts);
+      const r = await this.handleLeaderBuySignalNow(follow, signal, { ...opts, spend });
+      if (spend.entry) {
+        if (r?.status === 'filled' && r.position) {
+          // replace the reserved amount with what the buy really cost
+          const px = Number(CHAINS.solana?.nativePriceUsd) || 0;
+          const sol = Number(r.position.investedSol) > 0 ? Number(r.position.investedSol) : px > 0 ? Number(r.position.initialCostUsd) / px : spend.entry.sol;
+          spend.entry.sol = sol;
+          spend.entry.pending = false;
+        } else this.releaseTraderSpend(follow, spend.entry);
+        spend.entry = null;
+      }
+      return r;
+    } catch (err) {
+      if (spend.entry) this.releaseTraderSpend(follow, spend.entry);
+      throw err;
     } finally {
       this.buysInFlight.delete(key);
     }
+  }
+
+  /** Real SOL this trader's copies spent (or are spending right now) in the last 24 h. */
+  traderRealSpent24hSol(follow) {
+    const since = Date.now() - 24 * 3600_000;
+    if (!Array.isArray(follow.realSpendLog)) follow.realSpendLog = [];
+    follow.realSpendLog = follow.realSpendLog.filter((x) => x && x.t >= since);
+    return follow.realSpendLog.reduce((a, x) => a + (Number(x.sol) || 0), 0);
+  }
+
+  releaseTraderSpend(follow, entry) {
+    if (Array.isArray(follow.realSpendLog)) follow.realSpendLog = follow.realSpendLog.filter((x) => x !== entry);
   }
 
   /** Per-trader overrides (null = use the account setting). */
@@ -504,7 +531,8 @@ export class CopyTradingEngine {
     return (this.realizedLog || []).filter((r) => r.t >= cutoff && Boolean(r.paper) === Boolean(paper) && r.pnl < 0).reduce((a, r) => a + Math.abs(r.pnl), 0);
   }
 
-  async handleLeaderBuySignalNow(follow, signal, { dryRun = false } = {}) {
+  async handleLeaderBuySignalNow(follow, signal, opts = {}) {
+    const { dryRun = false } = opts;
     const wallet = this.getWalletById(follow.walletId);
     const chain = CHAINS[follow.chainId];
     const token = signal.token;
@@ -699,8 +727,21 @@ export class CopyTradingEngine {
     if (real && typeof this.adapter.realBuyRoomUsd === 'function') {
       const room = Number(this.adapter.realBuyRoomUsd());
       if (Number.isFinite(room)) {
-        if (room < 1) return this.recordSkip({ dryRun, follow, wallet, signal, reason: 'real-trading SOL limit reached for today' });
+        if (room < 1) return this.recordSkip({ dryRun, follow, wallet, signal, reason: "daily real-SOL limit reached (all traders) — change it in any trader's Settings" });
         desiredUsd = Math.min(desiredUsd, room);
+      }
+    }
+    // This trader's own daily real-SOL limit (trader Settings; empty = none). The buy's SOL is
+    // reserved right away so two buys at the same moment can't both pass the check.
+    const traderCapSol = Number(follow.maxRealSolPerDay);
+    if (real && traderCapSol > 0) {
+      const px = Number(CHAINS.solana?.nativePriceUsd) || 0;
+      const roomUsd = px > 0 ? Math.max(0, traderCapSol - this.traderRealSpent24hSol(follow)) * px : 0;
+      if (roomUsd < 1) return this.recordSkip({ dryRun, follow, wallet, signal, reason: `this trader's daily real-SOL limit reached (${traderCapSol} SOL) — change it in the trader's Settings` });
+      desiredUsd = Math.min(desiredUsd, roomUsd);
+      if (!dryRun && opts.spend) {
+        opts.spend.entry = { t: Date.now(), sol: desiredUsd / px, pending: true };
+        follow.realSpendLog.push(opts.spend.entry);
       }
     }
 

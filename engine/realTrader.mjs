@@ -119,11 +119,46 @@ export class RealTrader {
     this.jupBase = (env.JUPITER_API_URL || 'https://api.jup.ag/swap/v2').replace(/\/+$/, '');
     this.jupKey = env.JUPITER_API_KEY || '';
     const num = (v, d) => (v === undefined || v === '' || !Number.isFinite(Number(v)) ? d : Number(v));
-    this.caps = {
+    // Limits from .env / Railway variables; the per-buy and daily SOL limits can be changed from
+    // the dashboard (capsOverride, saved with the settings), which then wins over the variable
+    this.envCaps = {
       maxSolPerTrade: num(env.ODEX_REAL_MAX_SOL_PER_TRADE, 0.5),
       maxSolPerDay: num(env.ODEX_REAL_MAX_SOL_PER_DAY, 2), // 0 = no daily cap
       reserveSol: num(env.ODEX_REAL_RESERVE_SOL, 0.02), // kept for fees + token-account rent
       sellRetrySec: num(env.ODEX_REAL_SELL_RETRY_SEC, 3), // exits retry fast: a falling coin can't wait
+    };
+    this.capsOverride = () => null;
+    const self = this;
+    const pick = (k) => {
+      const o = self.capsOverride?.();
+      const v = o && o[k] !== null && o[k] !== undefined && o[k] !== '' ? Number(o[k]) : NaN;
+      return Number.isFinite(v) && v >= 0 ? v : self.envCaps[k];
+    };
+    this.caps = {
+      get maxSolPerTrade() {
+        return pick('maxSolPerTrade');
+      },
+      set maxSolPerTrade(v) {
+        self.envCaps.maxSolPerTrade = Number(v);
+      },
+      get maxSolPerDay() {
+        return pick('maxSolPerDay');
+      },
+      set maxSolPerDay(v) {
+        self.envCaps.maxSolPerDay = Number(v);
+      },
+      get reserveSol() {
+        return self.envCaps.reserveSol;
+      },
+      set reserveSol(v) {
+        self.envCaps.reserveSol = Number(v);
+      },
+      get sellRetrySec() {
+        return self.envCaps.sellRetrySec;
+      },
+      set sellRetrySec(v) {
+        self.envCaps.sellRetrySec = Number(v);
+      },
     };
     this.keypair = null;
     this.keyError = null;
@@ -181,7 +216,8 @@ export class RealTrader {
       address: this.address,
       keyError: this.keyError,
       jupiterKey: Boolean(this.jupKey),
-      caps: { ...this.caps },
+      caps: { maxSolPerTrade: this.caps.maxSolPerTrade, maxSolPerDay: this.caps.maxSolPerDay, reserveSol: this.caps.reserveSol, sellRetrySec: this.caps.sellRetrySec },
+      envCaps: { maxSolPerTrade: this.envCaps.maxSolPerTrade, maxSolPerDay: this.envCaps.maxSolPerDay },
       spent24hSol: Number(this.spent24hSol().toFixed(6)),
       balance: this.balance,
       lastError: this.lastError,

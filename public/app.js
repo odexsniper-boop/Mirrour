@@ -5648,11 +5648,38 @@ window.openEditFollowModal = function openEditFollowModal(id) {
   set('ef-topups', f.copyTopUps === true ? 'true' : f.copyTopUps === false ? 'false' : '');
   const ms = document.getElementById('ef-mirror-sells');
   if (ms) ms.checked = f.mirrorSells === true;
+  set('ef-max-sol-day', f.maxRealSolPerDay ?? '');
+  loadEditFollowSolLimits(f);
   syncEditFollowCopyAll();
   onEditFollowSizing();
   onEditFollowMode();
   document.getElementById('modal-edit-follow').classList.add('open');
 };
+
+// Daily real-SOL limits in the trader Settings: this trader's own + the overall one
+async function loadEditFollowSolLimits(f) {
+  const all = document.getElementById('ef-max-sol-day-all');
+  const hint = document.getElementById('ef-sol-day-hint');
+  if (!all) return;
+  all.dataset.loaded = '0';
+  all.value = '';
+  all.placeholder = 'Loading…';
+  try {
+    const st = await (await fetch('/api/real/status')).json();
+    const day = st?.caps?.maxSolPerDay;
+    all.value = day === undefined || day === null ? '' : String(day);
+    all.dataset.initial = all.value;
+    all.dataset.loaded = '1';
+    all.placeholder = '0 = no limit';
+    if (hint) {
+      const spentAll = Number(st?.spent24hSol || 0);
+      const spentMe = (Array.isArray(f.realSpendLog) ? f.realSpendLog : []).filter((x) => x && x.t >= Date.now() - 86400000).reduce((a, x) => a + (Number(x.sol) || 0), 0);
+      hint.textContent = `Used in the last 24 h: ${spentMe.toFixed(3)} SOL by this trader, ${spentAll.toFixed(3)} SOL by all traders. Real buys stop once a limit is used up; sells are never blocked.${st?.envCaps && Number(st.envCaps.maxSolPerDay) !== Number(day) ? ` (Railway variable: ${st.envCaps.maxSolPerDay} SOL — this setting wins.)` : ''}`;
+    }
+  } catch {
+    all.placeholder = 'Could not load';
+  }
+}
 
 window.openExitRulesFromEdit = function openExitRulesFromEdit() {
   const id = document.getElementById('ef-id').value;
@@ -5690,7 +5717,29 @@ window.saveEditFollow = async function saveEditFollow() {
     maxChasePct: num('ef-max-chase'),
     copyTopUps: val('ef-topups') === '' ? null : val('ef-topups') === 'true',
     mirrorSells: Boolean(document.getElementById('ef-mirror-sells')?.checked),
+    maxRealSolPerDay: num('ef-max-sol-day'),
   };
+  if (body.maxRealSolPerDay !== null && !(body.maxRealSolPerDay > 0)) {
+    msg.textContent = "The trader's daily SOL limit must be above 0 (leave it empty for no limit).";
+    return;
+  }
+  // the overall daily limit (all traders) is saved separately, only when it was changed
+  const allEl = document.getElementById('ef-max-sol-day-all');
+  const allNew = allEl && allEl.dataset.loaded === '1' && allEl.value.trim() !== allEl.dataset.initial ? allEl.value.trim() : null;
+  if (allNew !== null) {
+    const v = allNew === '' ? '' : Number(allNew);
+    if (v !== '' && !(v >= 0 && v <= 1000)) {
+      msg.textContent = 'The overall daily limit must be between 0 and 1000 SOL (0 = no limit).';
+      return;
+    }
+    const r = await fetch('/api/real/caps', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ maxSolPerDay: v }) });
+    const d = await r.json().catch(() => ({}));
+    if (!d.ok) {
+      msg.textContent = d.error || 'Could not save the overall daily limit.';
+      return;
+    }
+    allEl.dataset.initial = allNew;
+  }
   if (body.maxChasePct !== null && !(body.maxChasePct >= 1)) {
     msg.textContent = 'Max chase must be at least 1% (leave it empty to use the account setting).';
     return;

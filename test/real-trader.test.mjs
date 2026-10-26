@@ -653,3 +653,46 @@ test('speed: a tight balance is still read fresh before the buy, and a short wal
   assert.equal(e.positions.length, 0, 'refused: not enough SOL');
   assert.equal(w.sent.length, 0, 'nothing sent');
 });
+
+test("trader's own daily SOL limit: trims the buy that would cross it, then skips; failed buys give the room back", async () => {
+  const { w, trader } = world({ sol: 5 });
+  const { e, f } = engineFor(trader); // $50 buys = 0.25 SOL
+  f.maxRealSolPerDay = 0.3;
+  const mint2 = 'MemeMint2222222222222222222222222222222pump';
+  await e.processTraderSignal(buySig(f));
+  assert.equal(e.positions.length, 1, 'first buy');
+  const s2 = buySig(f);
+  s2.token = { ...s2.token, address: mint2 };
+  await e.processTraderSignal(s2);
+  const p2 = e.positions.find((p) => p.tokenAddress === mint2);
+  assert.ok(p2, 'second buy trimmed to what is left');
+  assert.ok(p2.initialCostUsd < 15, `trimmed to ~0.05 SOL ($10): ${p2.initialCostUsd}`);
+  const s3 = buySig(f);
+  s3.token = { ...s3.token, address: 'MemeMint3333333333333333333333333333333pump' };
+  const [r3] = await e.processTraderSignal(s3);
+  assert.match(r3.reason, /this trader's daily real-SOL limit reached \(0\.3 SOL\)/);
+  assert.ok(Math.abs(e.traderRealSpent24hSol(f) - 0.3) < 0.02, `spent ${e.traderRealSpent24hSol(f)}`);
+  // a buy that does not go through gives its reserved SOL back
+  const { w: w2, trader: t2 } = world({ sol: 5, executeMode: 'fail' });
+  const { e: e2, f: f2 } = engineFor(t2);
+  f2.maxRealSolPerDay = 1;
+  await e2.processTraderSignal(buySig(f2));
+  assert.equal(e2.positions.length, 0);
+  assert.equal(e2.traderRealSpent24hSol(f2), 0, 'reservation released');
+  assert.ok(w2.sent.length >= 0 && w.sent.length === 2);
+});
+
+test('daily / per-buy SOL limits set on the dashboard win over the Railway variable; empty falls back', () => {
+  const { trader } = world();
+  assert.equal(trader.caps.maxSolPerDay, 2, 'variable default');
+  let o = { maxSolPerDay: 5 };
+  trader.capsOverride = () => o;
+  assert.equal(trader.caps.maxSolPerDay, 5);
+  assert.equal(trader.status().caps.maxSolPerDay, 5);
+  assert.equal(trader.status().envCaps.maxSolPerDay, 2);
+  o = { maxSolPerDay: 0 }; // 0 = no daily limit
+  assert.equal(trader.caps.maxSolPerDay, 0);
+  o = {};
+  assert.equal(trader.caps.maxSolPerDay, 2, 'cleared → variable again');
+  assert.equal(trader.caps.reserveSol, 0.02, 'fee reserve is not changeable from the dashboard');
+});

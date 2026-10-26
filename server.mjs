@@ -114,7 +114,9 @@ export const realTrader = new RealTrader({
     // must not reset with it
     if (supabase.enabled) supabase.push([['realTrader', realTrader.exportState()]]).catch(() => {});
   },
-});
+});// per-buy / daily SOL limits set on the dashboard win over the Railway / .env variables
+realTrader.capsOverride = () => engine.settings.realCaps || null;
+
 engine.adapter.liveHooks = realTrader.hooks();
 
 // App integrations (Telegram, Discord): trade alerts pushed to your phone / channel
@@ -717,6 +719,28 @@ export const server = http.createServer(async (req, res) => {
       if (engine.realTradingActive()) await refreshRealBalance();
       return sendJson(res, 200, { ok: true, active: engine.realTradingActive(), paperTrading: engine.settings.paperTrading, solPriceLive, blocked: realBlockedReason || (otherInstance ? `another copy of Odex Mirror is running (${otherInstance.host}) — stop it to trade here` : null), onRailway: ON_RAILWAY, ...realTrader.status() });
     }
+    // Real-trading SOL limits from the dashboard (empty = use the Railway / .env variable)
+    if (req.method === 'POST' && pathname === '/api/real/caps') {
+      const body = await readJsonBody(req);
+      const next = { ...(engine.settings.realCaps || {}) };
+      const field = (k, max, label) => {
+        if (body[k] === undefined) return null;
+        if (body[k] === null || body[k] === '') {
+          delete next[k];
+          return null;
+        }
+        const v = Number(body[k]);
+        if (!Number.isFinite(v) || v < 0 || v > max) return `${label} must be between 0 and ${max} SOL.`;
+        next[k] = v;
+        return null;
+      };
+      const err = field('maxSolPerDay', 1000, 'Daily limit') || field('maxSolPerTrade', 100, 'Per-buy limit');
+      if (err) return sendJson(res, 400, { ok: false, error: err });
+      if (next.maxSolPerTrade === 0) return sendJson(res, 400, { ok: false, error: 'Per-buy limit must be above 0 SOL.' });
+      engine.settings.realCaps = Object.keys(next).length ? next : null;
+      engine.emit('settings_updated', {}); // saves (database + Supabase)
+      return sendJson(res, 200, { ok: true, ...realTrader.status(), state: engine.getStateSnapshot() });
+    }
     if (req.method === 'POST' && pathname === '/api/real/test') {
       const r = await realTrader.selfTest();
       return sendJson(res, 200, { ...r, steps: (r.steps || []).map((s) => redact(s, alchemy.apiKey)), error: r.error ? redact(r.error, alchemy.apiKey) : null });
@@ -917,6 +941,12 @@ export const server = http.createServer(async (req, res) => {
           follow.maxChasePct = v;
         }
         if (body.copyTopUps !== undefined) follow.copyTopUps = body.copyTopUps === null || body.copyTopUps === '' ? null : Boolean(body.copyTopUps);
+        // this trader's own daily real-SOL limit (empty = none; the overall daily limit still applies)
+        if (body.maxRealSolPerDay !== undefined) {
+          const v = body.maxRealSolPerDay === null || body.maxRealSolPerDay === '' ? null : Number(body.maxRealSolPerDay);
+          if (v !== null && !(Number.isFinite(v) && v > 0 && v <= 1000)) return sendJson(res, 400, { ok: false, error: "The trader's daily SOL limit must be above 0 and at most 1000 SOL (leave it empty for no limit)." });
+          follow.maxRealSolPerDay = v;
+        }
         if (body.filtersOverride) {
           follow.filtersOverride = {
             ...follow.filtersOverride,
