@@ -72,6 +72,22 @@ export function fastScalpExitRules() {
   });
 }
 
+/**
+ * "Follow the trader" preset, for skilled fast traders (Decu-style): sell the moment the
+ * trader sells, take profit early at +12%, and a wide −40% floor + 5 min cap only as a safety
+ * net for when the trader's own sell is slow or missed. No trailing stop: it sold normal dips
+ * the trader held through and won.
+ */
+export function followTraderExitRules() {
+  return createDefaultExitRules({
+    takeInitials: { enabled: true, takeAtPct: 12, sellSizePct: 100 },
+    moonbagTrail: { enabled: false, trailPct: 15, armsAtPct: 8 },
+    floor: { enabled: true, openingFloorPct: 40, tightensAfterSec: 3600, tightFloorPct: 40 },
+    waveCut: { enabled: false, afterSec: 90, needsPeakPct: 5 },
+    hardTimeCap: { enabled: true, timeCapSec: 300 },
+  });
+}
+
 export function activeExitRuleCount(rules) {
   return Object.values(rules || {}).filter((r) => r && r.enabled).length;
 }
@@ -912,7 +928,9 @@ export class CopyTradingEngine {
     const wallet = this.getWalletById(follow.walletId);
     // the trader fully exited: their next buy of this coin is a fresh entry again
     if (!dryRun && Number(signal.sellSharePct ?? 100) >= 99 && signal.token?.address) this.endCopiedCycle(follow.id, signal.token.address);
-    if (follow.mode !== 'mirror') {
+    // Auto-Exit can also sell when the trader sells ("Sell when the trader sells" on)
+    const followSells = follow.mode === 'mirror' || (follow.mode === 'auto-exit' && follow.mirrorSells === true);
+    if (!followSells) {
       return this.recordSkip({
         dryRun,
         follow,
@@ -946,11 +964,14 @@ export class CopyTradingEngine {
       });
     }
 
-    const sellPct = Math.min(100, Math.max(1, Number(signal.sellSharePct || 100)));
+    let sellPct = Math.min(100, Math.max(1, Number(signal.sellSharePct || 100)));
+    // On Auto-Exit every exit closes the whole position: the trader selling half or more of
+    // their bag is their exit, so we sell everything (smaller trims are mirrored as they are)
+    if (follow.mode === 'auto-exit' && sellPct >= 50) sellPct = 100;
     if (dryRun) return { status: 'would_copy', dryRun: true, sellPct };
     return this.executePositionSell(pos.id, {
       sellPct,
-      cause: 'Mirror sell',
+      cause: follow.mode === 'auto-exit' ? 'trader sold' : 'Mirror sell',
       traderExitPriceUsd: Number(signal.token?.traderFillPriceUsd) || null,
     });
   }
@@ -1028,7 +1049,7 @@ export class CopyTradingEngine {
       this.settings.sellSlippagePct !== null && this.settings.sellSlippagePct !== undefined && this.settings.sellSlippagePct !== ''
         ? Number(this.settings.sellSlippagePct)
         : null;
-    const baseSellSlip = pos.chainId === 'solana' ? (cause === 'Mirror sell' ? 15 : 1) : 5;
+    const baseSellSlip = pos.chainId === 'solana' ? (cause === 'Mirror sell' || cause === 'trader sold' ? 15 : 1) : 5;
     // Real sells with no slippage set: Jupiter picks it from live conditions (a fixed 1% fails
     // most pump.fun sells). Paper keeps the modelled default.
     let sellSlippagePct = userSellSlip !== null ? userSellSlip : real ? null : baseSellSlip;
@@ -1548,10 +1569,22 @@ export class CopyTradingEngine {
    * Batched live quotes from DexScreener. Picks each token's deepest pool where it is the
    * base token, so the price matches what the trader and a copy would actually trade at.
    */
-  async fetchLivePrices(mints) {
+  async fetchLivePrices(allMints) {
     const out = new Map();
-    if (!mints.length || typeof fetch !== 'function') return out;
+    if (!allMints.length || typeof fetch !== 'function') return out;
     const fetchImpl = this.priceFetch || fetch;
+    // fast exit checks: a price fetched less than livePriceMinAgeMs ago is reused (the feed
+    // itself updates every few seconds, so asking more often only risks its rate limit)
+    const minAge = Number(this.livePriceMinAgeMs) || 0;
+    if (!this.livePriceCache) this.livePriceCache = new Map();
+    const now = Date.now();
+    const mints = [];
+    for (const m of allMints) {
+      const c = minAge > 0 ? this.livePriceCache.get(m) : null;
+      if (c && now - c.at < minAge) {
+        if (c.value) out.set(m, c.value);
+      } else mints.push(m);
+    }
     for (let i = 0; i < mints.length; i += 30) {
       const chunk = mints.slice(i, i + 30);
       try {
@@ -1570,6 +1603,10 @@ export class CopyTradingEngine {
           if (!prev || liq > prev.liquidityUsd) {
             out.set(mint, { priceUsd: Number(pair.priceUsd), marketCapUsd: Number(pair.marketCap || pair.fdv || 0), liquidityUsd: liq });
           }
+        }
+        if (minAge > 0) {
+          for (const m of chunk) this.livePriceCache.set(m, { at: now, value: out.get(m) || null });
+          if (this.livePriceCache.size > 500) this.livePriceCache = new Map([...this.livePriceCache].slice(-250));
         }
       } catch (err) {
         // network hiccup: positions keep their last live price

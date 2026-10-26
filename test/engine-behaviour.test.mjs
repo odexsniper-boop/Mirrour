@@ -553,3 +553,94 @@ test('F7 leader-sell skip message names the actual mode', async () => {
   assert.match(r.reason, /Auto-Exit/);
   assert.doesNotMatch(r.reason, /Buy & Hold/);
 });
+
+// ---------------------------------------------------------------------------
+// Follow the trader: Auto-Exit that also sells when the trader sells
+// ---------------------------------------------------------------------------
+
+const traderSell = (f, p, pct) => ({
+  chainId: 'solana', side: 'sell', sellSharePct: pct,
+  traderHandle: f.handle, traderWallet: f.traderWallet,
+  token: { address: p.tokenAddress, symbol: p.symbol, traderFillPriceUsd: p.entryPriceUsd },
+});
+
+test('FT1 Auto-Exit + "sell when the trader sells": their full exit closes the whole position', async () => {
+  const e = makeEngine();
+  const f = addFollow(e, { mode: 'auto-exit', mirrorSells: true });
+  const { position: p } = await open(e, f);
+  await e.processTraderSignal(traderSell(f, p, 100));
+  assert.equal(lastSell(e).cause, 'trader sold');
+  assert.equal(p.remainingTokens, 0, 'closed');
+});
+
+test('FT2 a trader selling half or more is their exit: we sell everything (every exit closes the position)', async () => {
+  const e = makeEngine();
+  const f = addFollow(e, { mode: 'auto-exit', mirrorSells: true });
+  const { position: p } = await open(e, f);
+  await e.processTraderSignal(traderSell(f, p, 60));
+  assert.equal(p.remainingTokens, 0);
+});
+
+test('FT3 a small trader trim is mirrored as it is, not as a full exit', async () => {
+  const e = makeEngine();
+  const f = addFollow(e, { mode: 'auto-exit', mirrorSells: true });
+  const { position: p } = await open(e, f);
+  await e.processTraderSignal(traderSell(f, p, 25));
+  assert.ok(Math.abs(p.remainingTokens / p.initialTokens - 0.75) < 0.001, `${p.remainingTokens / p.initialTokens}`);
+});
+
+test('FT4 without the switch, Auto-Exit still ignores trader sells', async () => {
+  const e = makeEngine();
+  const f = addFollow(e, { mode: 'auto-exit', mirrorSells: false });
+  const { position: p } = await open(e, f);
+  const [r] = await e.processTraderSignal(traderSell(f, p, 100));
+  assert.equal(r.status, 'skipped');
+  assert.ok(p.remainingTokens > 0);
+});
+
+test('FT5 Follow the trader preset: +12% take profit sells all, no trail, −40% floor, 5 min cap', async () => {
+  const { followTraderExitRules } = await import('../engine/copyEngine.mjs');
+  const r = followTraderExitRules();
+  assert.deepEqual([r.takeInitials.enabled, r.takeInitials.takeAtPct, r.takeInitials.sellSizePct], [true, 12, 100]);
+  assert.equal(r.moonbagTrail.enabled, false);
+  assert.deepEqual([r.floor.enabled, r.floor.openingFloorPct, r.floor.tightFloorPct], [true, 40, 40]);
+  assert.equal(r.waveCut.enabled, false);
+  assert.deepEqual([r.hardTimeCap.enabled, r.hardTimeCap.timeCapSec], [true, 300]);
+  // on a position: a −30% dip the trader holds through does NOT sell; −40% does; +12% does
+  const e = makeEngine();
+  const f = addFollow(e, { mode: 'auto-exit', mirrorSells: true, exitRules: r });
+  const { position: p } = await open(e, f);
+  setGain(p, -30);
+  await e.evaluatePositionExits(p, at(p, 20));
+  assert.ok(p.remainingTokens > 0, 'held through a −30% dip');
+  setGain(p, -40.5);
+  await e.evaluatePositionExits(p, at(p, 25));
+  assert.equal(p.remainingTokens, 0, 'floor sold at −40%');
+  const { position: q } = await open(e, f);
+  setGain(q, 12.5);
+  await e.evaluatePositionExits(q, at(q, 10));
+  assert.equal(q.remainingTokens, 0, 'take profit sold everything');
+  const { position: z } = await open(e, f);
+  setGain(z, 3);
+  await e.evaluatePositionExits(z, at(z, 301));
+  assert.equal(z.remainingTokens, 0, '5 min cap');
+});
+
+test('FT6 fast exit checks reuse a DexScreener price for 1.5 s instead of asking again', async () => {
+  const e = makeEngine();
+  let calls = 0;
+  e.priceFetch = async (url) => {
+    calls++;
+    const mint = String(url).split('/').pop();
+    return { ok: true, json: async () => ({ pairs: [{ baseToken: { address: mint }, priceUsd: '0.002', liquidity: { usd: 1000 } }] }) };
+  };
+  const M = 'X'.repeat(40);
+  e.livePriceMinAgeMs = 1500;
+  const a = await e.fetchLivePrices([M]);
+  const b = await e.fetchLivePrices([M]);
+  assert.equal(calls, 1, 'second check within 1.5 s used the cached price');
+  assert.equal(b.get(M).priceUsd, a.get(M).priceUsd);
+  e.livePriceMinAgeMs = 0; // tests / default: always fresh
+  await e.fetchLivePrices([M]);
+  assert.equal(calls, 2);
+});

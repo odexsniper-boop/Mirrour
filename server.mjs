@@ -3,7 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
-import { CopyTradingEngine, createDefaultExitRules, recommendedExitRules, fastScalpExitRules, activeExitRuleCount, createDefaultUiSettings } from './engine/copyEngine.mjs';
+import { CopyTradingEngine, createDefaultExitRules, recommendedExitRules, fastScalpExitRules, followTraderExitRules, activeExitRuleCount, createDefaultUiSettings } from './engine/copyEngine.mjs';
 import { CHAINS } from './engine/chainAdapters.mjs';
 import { LiveSignalService } from './engine/liveSignals.mjs';
 import { isSolanaAddress } from './engine/walletWatcher.mjs';
@@ -253,7 +253,7 @@ engine.onUpdate((evt) => {
   }
 });
 
-// Live 2-second price tick & exit evaluation loop
+// Live price tick & exit evaluation loop (0.5 s with a real trade open, 2 s otherwise)
 // Every manual change to a wallet's paper money is logged (newest 200), so the balance can
 // always be reconciled: start + funding changes − buys + sells = balance.
 function logPaperFunding(w, type, beforeUsd) {
@@ -268,8 +268,17 @@ let autoTickEnabled = true;
 // Ticks may overlap (a real sell can take seconds) but never pile up; an error in one tick is
 // logged and the next tick runs normally (it must never stop exits on open positions)
 let ticksRunning = 0;
+// Exits are checked every 0.5 s while a REAL trade is open (on a falling pump.fun coin, each
+// second of waiting costs several %), every 2 s otherwise. Pump.fun prices come straight from
+// the chain each check; DexScreener prices are reused for 1.5 s so it is never flooded.
+const FAST_TICK_MS = Number(process.env.ODEX_REAL_EXIT_TICK_MS || 500);
+engine.livePriceMinAgeMs = 1500;
+let lastTickAt = 0;
 setInterval(async () => {
   if (!autoTickEnabled || ticksRunning >= 2 || shuttingDownFlag) return;
+  const realOpen = engine.positions.some((p) => p.remainingTokens > 0 && p.isPaper === false);
+  if (!realOpen && Date.now() - lastTickAt < 1950) return;
+  lastTickAt = Date.now();
   ticksRunning += 1;
   try {
     await engine.tickMarketPrices();
@@ -278,7 +287,7 @@ setInterval(async () => {
   } finally {
     ticksRunning -= 1;
   }
-}, 2000);
+}, Math.max(250, Math.min(2000, FAST_TICK_MS)));
 
 // Storage: closed trades + history older than 2 days are cleared (at start, then every 30 min)
 function pruneOld() {
@@ -874,6 +883,13 @@ export const server = http.createServer(async (req, res) => {
           follow.exitRules = fastScalpExitRules();
           follow.mode = 'auto-exit';
         }
+        // "Follow the trader": sell when they sell, +12% take profit, −40% floor, 5 min cap
+        if (body.useFollowTrader) {
+          follow.exitRules = followTraderExitRules();
+          follow.mode = 'auto-exit';
+          follow.mirrorSells = true;
+        }
+        if (body.mirrorSells !== undefined) follow.mirrorSells = Boolean(body.mirrorSells);
         if (body.sizing) {
           follow.sizing = {
             type: body.sizing.type || follow.sizing.type,
