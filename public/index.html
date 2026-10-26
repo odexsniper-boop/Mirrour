@@ -346,7 +346,14 @@
                 <p class="card-sub" id="closed-sub">Copied trades that have been fully sold</p>
               </div>
             </div>
-            <div class="card-actions closed-totals" id="closed-totals"></div>
+            <div class="closed-head-right">
+              <div class="seg closed-kind" id="closed-kind" role="group" aria-label="Show real or paper trades">
+                <button type="button" class="seg-btn active" data-kind="all" onclick="setClosedKind('all')">All</button>
+                <button type="button" class="seg-btn" data-kind="real" onclick="setClosedKind('real')">Real SOL</button>
+                <button type="button" class="seg-btn" data-kind="paper" onclick="setClosedKind('paper')">Paper</button>
+              </div>
+              <div class="card-actions closed-totals" id="closed-totals"></div>
+            </div>
           </div>
           <div class="table-wrap closed-wrap">
             <table class="data-table closed-table">

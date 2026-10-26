@@ -1001,18 +1001,80 @@ function renderClosedPager(total) {
   el.innerHTML = `<span class="cp-info">${from}–${to} of ${total}</span><div class="cp-nums"><button type="button" class="cp-btn cp-nav" onclick="setClosedPage(${closedPage - 1})" ${closedPage === 1 ? 'disabled' : ''} aria-label="Previous page">‹</button>${parts.join('')}<button type="button" class="cp-btn cp-nav" onclick="setClosedPage(${closedPage + 1})" ${closedPage === pages ? 'disabled' : ''} aria-label="Next page">›</button></div>`;
 }
 
+// Closed trades filter: all / real SOL only / paper only (remembered in this browser)
+let closedKind = 'all';
+try {
+  const k = localStorage.getItem('odex.closedKind');
+  if (k === 'real' || k === 'paper' || k === 'all') closedKind = k;
+} catch {
+  // storage unavailable: default
+}
+const isRealClosed = (r) => r.isPaper === false;
+window.setClosedKind = function setClosedKind(kind) {
+  closedKind = kind === 'real' || kind === 'paper' ? kind : 'all';
+  try {
+    localStorage.setItem('odex.closedKind', closedKind);
+  } catch {
+    // ignore
+  }
+  closedPage = 1;
+  renderClosedPositions();
+};
+// Totals for the Closed card from the PnL log, for real, paper or both (all = real + paper)
+const closedSummaries = new Map(); // key → { data, at, loading }
+function closedSummary(kind) {
+  const k = pnlSummaryKey();
+  const get = (mode) => {
+    const key = `${k.from}|${k.to}|${mode}`;
+    const c = closedSummaries.get(key);
+    if (!c || (Date.now() - c.at > 15_000 && !c.loading)) {
+      const entry = c || { data: null, at: 0, loading: false };
+      entry.loading = true;
+      closedSummaries.set(key, entry);
+      fetch(`/api/pnl/summary?${new URLSearchParams({ from: String(k.from), to: String(k.to), mode })}`)
+        .then((r) => r.json())
+        .then((d) => {
+          if (d.ok) Object.assign(entry, { data: d, at: Date.now() });
+          if (engineState) renderClosedPositions();
+        })
+        .catch(() => {})
+        .finally(() => {
+          entry.loading = false;
+        });
+    }
+    return c?.data || null;
+  };
+  if (kind !== 'all') return get(kind);
+  const a = get('real');
+  const b = get('paper');
+  if (!a || !b) return null;
+  return { trades: a.trades + b.trades, wins: a.wins + b.wins, realized: a.realized + b.realized, realizedSol: (a.realizedSol || 0) + (b.realizedSol || 0), solExact: a.solExact && b.solExact };
+}
+
 function renderClosedPositions() {
   const tbody = document.getElementById('closed-tbody');
   const all = engineState?.closedPositions || [];
   const badge = document.getElementById('badge-closed-count');
   if (badge) badge.textContent = String(all.filter((r) => inDateFilter(r.closedAt || r.openedAt)).length);
   if (!tbody) return;
-  const rows = all.filter(matchesTraderFilter).filter((r) => inDateFilter(r.closedAt || r.openedAt));
+  const dated = all.filter(matchesTraderFilter).filter((r) => inDateFilter(r.closedAt || r.openedAt));
+  const rows = closedKind === 'all' ? dated : dated.filter((r) => (closedKind === 'real' ? isRealClosed(r) : !isRealClosed(r)));
+  // filter buttons with how many trades each holds
+  const kindEl = document.getElementById('closed-kind');
+  if (kindEl) {
+    const n = { all: dated.length, real: dated.filter(isRealClosed).length, paper: dated.filter((r) => !isRealClosed(r)).length };
+    kindEl.querySelectorAll('.seg-btn').forEach((b) => {
+      const kd = b.dataset.kind;
+      b.classList.toggle('active', kd === closedKind);
+      b.setAttribute('aria-pressed', kd === closedKind ? 'true' : 'false');
+      b.innerHTML = `${kd === 'all' ? 'All' : kd === 'real' ? 'Real SOL' : 'Paper'}<span class="ck-n">${n[kd]}</span>`;
+    });
+  }
   const totals = document.getElementById('closed-totals');
   if (totals) {
-    // Totals come from the PnL log (same as the cards and the calendar); with a trader filter the
-    // listed rows are summed instead
-    const S = !traderFilter ? currentPnlSummary() : null;
+    // Totals come from the PnL log (same as the cards and the calendar) for the chosen kind; with a
+    // trader filter the listed rows are summed instead
+    const S = !traderFilter ? closedSummary(closedKind) : null;
     const count = S ? S.trades : rows.length;
     const pnl = S ? S.realized : rows.reduce((a, r) => a + r.pnlUsd, 0);
     const wins = S ? S.wins : rows.filter((r) => r.pnlUsd > 0).length;
@@ -1024,7 +1086,7 @@ function renderClosedPositions() {
       ? `<span class="closed-stat">${count} trade${count === 1 ? '' : 's'}</span><span class="closed-stat">Win rate <strong>${Math.round((wins / count) * 100)}%</strong></span><span class="closed-stat">Realized <strong class="${pnl >= 0 ? 'pos-up' : 'pos-down'}">${signedUsd(pnl)}</strong>${solRows.length ? `<span class="closed-stat-sol ${pnlSol >= 0 ? 'pos-up' : 'pos-down'}">${solExact ? '' : '≈'}${signedSol(pnlSol)}</span>` : ''}</span>`
       : '';
   }
-  const fk = `${dateFilterState.preset}|${traderFilter?.label || ''}|${JSON.stringify(activeDateRange())}`;
+  const fk = `${dateFilterState.preset}|${traderFilter?.label || ''}|${JSON.stringify(activeDateRange())}|${closedKind}`;
   if (fk !== closedFilterKey) {
     closedFilterKey = fk;
     closedPage = 1;
@@ -1033,6 +1095,11 @@ function renderClosedPositions() {
   renderClosedPager(rows.length);
   if (!rows.length) {
     tbody.__lastHtml = null;
+    const kindWord = closedKind === 'real' ? 'real SOL ' : closedKind === 'paper' ? 'paper ' : '';
+    if (kindWord && dated.length) {
+      tbody.innerHTML = emptyRowHtml(6, `No ${kindWord}trades closed${dateFilterState.preset !== 'all' ? ` ${dateFilterPhrase()}` : ''}${traderFilter ? ` from ${esc(traderFilter.label)}` : ''}`, `Switch to "All" to see the ${dated.length} other closed trade${dated.length === 1 ? '' : 's'}.`);
+      return;
+    }
     tbody.innerHTML = emptyRowHtml(6, traderFilter ? `No closed trades from ${esc(traderFilter.label)}${dateFilterState.preset !== 'all' ? ` ${dateFilterPhrase()}` : ''}` : dateFilterState.preset !== 'all' && all.length ? `No closed trades ${dateFilterPhrase()}` : 'No closed trades yet', 'When a copied position is fully sold (by your exit rules, a mirror sell or by hand) it shows up here with what you paid, what came back and the result.');
     return;
   }
@@ -1047,7 +1114,7 @@ function renderClosedPositions() {
             <div class="closed-token">
               ${tokenAvatar(r.imageUrl, r.symbol, 62, r.tokenAddress)}
               <div class="closed-token-main">
-                <div class="closed-sym">${tokenLinkHtml(r.symbol, r.tokenAddress)}${r.isPaper ? '<span class="sig-pill sp-dex">paper</span>' : ''}</div>
+                <div class="closed-sym">${tokenLinkHtml(r.symbol, r.tokenAddress)}${isRealClosed(r) ? '<span class="sig-pill sp-real" title="Real SOL trade from the bot wallet">real</span>' : '<span class="sig-pill sp-dex">paper</span>'}</div>
                 <div class="closed-meta"><span class="closed-held" title="Held for ${held}">${held}</span><span class="muted">${esc(r.name && r.name !== r.symbol ? r.name : '')}</span> ${traderLinkHtml(r.traderHandle, r.traderWallet)}</div>
               </div>
             </div>

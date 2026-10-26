@@ -6774,3 +6774,11 @@ body, button, input, select, textarea, .kpi-label, .card-title, .term-tab {
 .scalp-preset strong { font-size: 13px; font-weight: 500; color: #fff; }
 .scalp-preset p { margin: 2px 0 0; font-size: 11.5px; line-height: 1.45; color: var(--text-mute, #8b8d97); }
 .scalp-preset .btn { flex: none; }
+
+/* Closed trades: All / Real SOL / Paper filter */
+.closed-head-right{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+.closed-kind .seg-btn{height:28px;font-size:12px}
+.closed-kind .seg-btn .ck-n{margin-left:5px;color:var(--text-dim);font-size:11px}
+.closed-kind .seg-btn.active .ck-n{color:#c4b5fd}
+.sp-real{background:rgba(20,241,149,.12);color:#5eead4}
+@media (max-width:720px){.closed-head-right{justify-content:flex-start;width:100%}}
