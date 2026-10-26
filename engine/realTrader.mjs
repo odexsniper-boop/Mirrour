@@ -142,6 +142,8 @@ export class RealTrader {
     this.balance = null; // { sol, usdc, at }
     this.sellBlockedUntil = new Map(); // mint -> time (back-off after a failed sell)
     this.pendingBuySol = 0; // SOL of buys signed/sending but not finished yet
+    this.prefetchedBalance = null; // { at, promise }: balance read while Jupiter quotes a buy
+    this.lastBuyDoneAt = 0; // a balance read before this moment may still hold a finished buy's SOL
   }
 
   get address() {
@@ -313,7 +315,9 @@ export class RealTrader {
     let tokDec;
     if (side === 'buy') {
       const amountRaw = quoteMint === WSOL_MINT ? BigInt(Math.floor((amountUsd / px) * LAMPORTS)) : BigInt(Math.floor(amountUsd * 1e6));
-      // copy speed: a brand-new coin's decimals (one RPC call) are read while Jupiter quotes
+      // copy speed: the wallet balance and a brand-new coin's decimals (one RPC call each) are
+      // read while Jupiter quotes, so the buy's balance check does not wait for them later
+      this.prefetchedBalance = { at: this.now(), promise: this.refreshBalance().catch(() => null) };
       [tokDec, order] = await Promise.all([this.getDecimals(token.address), this.order({ inputMint: quoteMint, outputMint: token.address, amountRaw, slippagePct })]);
       const tokensOut = Number(order.outAmount) / 10 ** tokDec;
       quotedPriceUsd = tokensOut > 0 ? amountUsd / tokensOut : 0;
@@ -408,24 +412,25 @@ export class RealTrader {
       // the same time could otherwise both pass the check and go over the cap together.
       reserved = { t: this.now(), sol: solIn };
       this.spendLog.push(reserved);
+      // SOL already promised to other buys still in progress is not spendable. This buy's own SOL
+      // is promised BEFORE any await, so two buys at the same moment can never both pass.
+      const pendingSol = quoteMint === WSOL_MINT ? this.pendingBuySol : 0;
+      if (quoteMint === WSOL_MINT) {
+        pendingAdded = solIn;
+        this.pendingBuySol += solIn;
+      }
       try {
-        // SOL already promised to other buys still in progress is not spendable
-        const pendingSol = quoteMint === WSOL_MINT ? this.pendingBuySol : 0;
         const needSol = (quoteMint === WSOL_MINT ? solIn : 0) + pendingSol + this.caps.reserveSol;
-        // Copy speed: a balance read in the last 20 s that covers this buy with plenty to spare
-        // is trusted (refreshed in the background); only a tight balance waits for a fresh read
-        const cached = this.balance && this.now() - this.balance.at < 20_000 ? this.balance : null;
-        const roomy = cached && cached.sol >= needSol * 1.25 + 0.02 && (quoteMint !== USDC_MINT || cached.usdc >= amountUsd * 1.25);
-        const bal = roomy ? cached : await this.refreshBalance();
-        if (roomy) this.refreshBalance().catch(() => {});
+        // Copy speed: the balance was read while Jupiter quoted (no extra wait). It is used only
+        // if it is fresh and no other buy finished since (that buy's SOL could still be in it).
+        const pre = this.prefetchedBalance;
+        this.prefetchedBalance = null;
+        const usable = pre && this.now() - pre.at < 5000 && pre.at > this.lastBuyDoneAt;
+        const bal = (usable && (await pre.promise)) || (await this.refreshBalance());
         if (bal.sol < needSol) return release(this.fail(`not enough SOL: wallet has ${bal.sol.toFixed(4)}, needs ${needSol.toFixed(4)} (incl. ${this.caps.reserveSol} SOL kept for fees${pendingSol > 0 ? `, ${pendingSol.toFixed(4)} SOL for buys in progress` : ''})`));
         if (quoteMint === USDC_MINT && bal.usdc < amountUsd) return release(this.fail(`not enough USDC: wallet has ${bal.usdc.toFixed(2)}`));
       } catch (err) {
         return release(this.fail(`could not read wallet balance: ${err.message}`));
-      }
-      if (quoteMint === WSOL_MINT) {
-        pendingAdded = solIn;
-        this.pendingBuySol += solIn;
       }
     }
 
@@ -558,6 +563,7 @@ export class RealTrader {
     return result;
     } finally {
       if (pendingAdded) {
+        this.lastBuyDoneAt = this.now();
         this.pendingBuySol -= pendingAdded;
         if (this.pendingBuySol < 1e-9) this.pendingBuySol = 0; // no float leftovers
       }

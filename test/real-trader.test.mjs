@@ -594,20 +594,47 @@ test('a failing real exit retries with more slippage room (auto → 25% → 50%)
   assert.equal(p.realSellFails, 0);
 });
 
-test('speed: a roomy recent balance is trusted (no balance read before sending); one Jupiter quote per copy; timings recorded', { timeout: 5000 }, async () => {
+test('speed: the balance is read while Jupiter quotes (no extra wait before sending); one quote per copy; timings recorded', { timeout: 5000 }, async () => {
   const { w, trader } = world({ sol: 5 });
   const { e, f } = engineFor(trader);
-  await trader.refreshBalance(); // the server refreshes every 15 s in real mode
+  const log = [];
   const rpc = trader.rpc;
-  // from now on a balance read never answers: if the buy waited for one, it would hang
-  trader.rpc = (m, p) => (m === 'getBalance' ? new Promise(() => {}) : rpc(m, p));
+  trader.rpc = async (m, p) => {
+    if (m === 'getBalance') log.push('balance-start');
+    const r = await rpc(m, p);
+    if (m === 'getBalance') log.push('balance-done');
+    return r;
+  };
+  const fetch0 = trader.fetch;
+  trader.fetch = async (url, opts) => {
+    const path = new URL(url).pathname.split('/').pop();
+    log.push(`${path}-start`);
+    const r = await fetch0(url, opts);
+    log.push(`${path}-done`);
+    return r;
+  };
   const ordersBefore = w.orders;
   await e.processTraderSignal(buySig(f));
-  assert.ok(e.positions[0], 'bought without waiting for a balance read');
+  assert.ok(e.positions[0], 'bought');
   assert.equal(w.orders - ordersBefore, 1, 'exactly one Jupiter quote');
+  // the balance read starts before the quote finishes, and no new balance read starts between
+  // the quote and the send
+  assert.ok(log.indexOf('balance-start') < log.indexOf('order-done'), log.join(' '));
+  const between = log.slice(log.indexOf('order-done'), log.indexOf('execute-start'));
+  assert.ok(!between.includes('balance-start'), `no balance wait between quote and send: ${log.join(' ')}`);
   const rec = trader.trades[0];
   assert.ok(rec.timing && Number.isFinite(rec.timing.sendMs), 'send time recorded');
   assert.ok(Number.isFinite(rec.timing.quoteMs), 'quote time recorded');
+});
+
+test('speed: two buys at the same moment with SOL for only one: exactly one goes out', async () => {
+  const { w, trader } = world({ sol: 0.32 }); // $50 = 0.25 SOL; 2 buys need 0.5 + reserve
+  const { e, f } = engineFor(trader);
+  const s2 = buySig(f);
+  s2.token = { ...s2.token, address: 'MemeMint2222222222222222222222222222222pump' };
+  await Promise.all([e.processTraderSignal(buySig(f)), e.processTraderSignal(s2)]);
+  assert.equal(w.sent.length, 1, 'only one buy sent');
+  assert.equal(e.positions.length, 1);
 });
 
 test('speed: a tight balance is still read fresh before the buy, and a short wallet is refused', async () => {
