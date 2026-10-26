@@ -306,18 +306,21 @@ export class RealTrader {
     const px = Number(this.solPrice()) || 0;
     if (!(px > 0)) throw new Error('SOL price not known yet');
     const quoteMint = this.quoteAssetMint(assetMode);
-    const tokDec = await this.getDecimals(token.address);
     const marketPx = Number(token.currentPriceUsd) || 0;
+    const t0 = this.now();
     let order;
     let quotedPriceUsd;
+    let tokDec;
     if (side === 'buy') {
       const amountRaw = quoteMint === WSOL_MINT ? BigInt(Math.floor((amountUsd / px) * LAMPORTS)) : BigInt(Math.floor(amountUsd * 1e6));
-      order = await this.order({ inputMint: quoteMint, outputMint: token.address, amountRaw, slippagePct });
+      // copy speed: a brand-new coin's decimals (one RPC call) are read while Jupiter quotes
+      [tokDec, order] = await Promise.all([this.getDecimals(token.address), this.order({ inputMint: quoteMint, outputMint: token.address, amountRaw, slippagePct })]);
       const tokensOut = Number(order.outAmount) / 10 ** tokDec;
       quotedPriceUsd = tokensOut > 0 ? amountUsd / tokensOut : 0;
     } else {
       const until = this.sellBlockedUntil.get(token.address) || 0;
       if (this.now() < until) throw Object.assign(new Error(`waiting ${Math.ceil((until - this.now()) / 1000)} s before retrying this sell`), { backoff: true });
+      tokDec = await this.getDecimals(token.address);
       const raw = await this.sellAmountRaw(token.address, tokenAmount, tokDec);
       order = await this.order({ inputMint: token.address, outputMint: quoteMint, amountRaw: raw, slippagePct });
       const outUsd = quoteMint === WSOL_MINT ? (Number(order.outAmount) / LAMPORTS) * px : Number(order.outAmount) / 1e6;
@@ -339,6 +342,7 @@ export class RealTrader {
       _order: order,
       _slippagePct: slippagePct,
       _side: side,
+      _quoteMs: this.now() - t0,
     };
   }
 
@@ -405,10 +409,15 @@ export class RealTrader {
       reserved = { t: this.now(), sol: solIn };
       this.spendLog.push(reserved);
       try {
-        const bal = await this.refreshBalance();
         // SOL already promised to other buys still in progress is not spendable
         const pendingSol = quoteMint === WSOL_MINT ? this.pendingBuySol : 0;
         const needSol = (quoteMint === WSOL_MINT ? solIn : 0) + pendingSol + this.caps.reserveSol;
+        // Copy speed: a balance read in the last 20 s that covers this buy with plenty to spare
+        // is trusted (refreshed in the background); only a tight balance waits for a fresh read
+        const cached = this.balance && this.now() - this.balance.at < 20_000 ? this.balance : null;
+        const roomy = cached && cached.sol >= needSol * 1.25 + 0.02 && (quoteMint !== USDC_MINT || cached.usdc >= amountUsd * 1.25);
+        const bal = roomy ? cached : await this.refreshBalance();
+        if (roomy) this.refreshBalance().catch(() => {});
         if (bal.sol < needSol) return release(this.fail(`not enough SOL: wallet has ${bal.sol.toFixed(4)}, needs ${needSol.toFixed(4)} (incl. ${this.caps.reserveSol} SOL kept for fees${pendingSol > 0 ? `, ${pendingSol.toFixed(4)} SOL for buys in progress` : ''})`));
         if (quoteMint === USDC_MINT && bal.usdc < amountUsd) return release(this.fail(`not enough USDC: wallet has ${bal.usdc.toFixed(2)}`));
       } catch (err) {
@@ -423,10 +432,12 @@ export class RealTrader {
     // ----- order (reuse the quote's if it is fresh and for the same slippage) -----
     let order = quote?._order;
     const fresh = order && quote._side === side && quote._slippagePct === slippagePct && this.now() - order.fetchedAt < 8000;
+    let quoteMs = fresh ? quote._quoteMs ?? null : null;
     try {
       if (!fresh) {
         const q = await this.quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode });
         order = q._order;
+        quoteMs = q._quoteMs ?? null;
       }
     } catch (err) {
       if (side === 'sell') this.sellBlockedUntil.set(mint, this.now() + this.caps.sellRetrySec * 1000);
@@ -445,12 +456,15 @@ export class RealTrader {
 
     let exec = null;
     let execErr = null;
+    const sendStart = this.now();
     try {
       exec = await this.jup('/execute', { method: 'POST', body: { signedTransaction: signed.signedBase64, requestId: order.requestId }, timeoutMs: 45_000 });
     } catch (err) {
       execErr = err;
     }
 
+    // copy speed, measured: Jupiter quote time and send → landed time
+    const timing = { quoteMs, sendMs: this.now() - sendStart };
     let landed = exec && (exec.status === 'Success' || Number(exec.code) === 0);
     const signature = exec?.signature || signed.signature;
     if (!exec || (!landed && execErr)) {
@@ -538,7 +552,8 @@ export class RealTrader {
       };
     }
     if (fill.estimated) result.estimated = true;
-    this.record({ side, mint, symbol: token.symbol, signature, ok: true, estimated: Boolean(fill.estimated), usd: Number((side === 'buy' ? result.spentUsd : result.receivedUsd).toFixed(4)), networkFeeUsd: Number(networkFeeUsd.toFixed(4)) });
+    result.timing = timing;
+    this.record({ side, mint, symbol: token.symbol, signature, ok: true, timing, estimated: Boolean(fill.estimated), usd: Number((side === 'buy' ? result.spentUsd : result.receivedUsd).toFixed(4)), networkFeeUsd: Number(networkFeeUsd.toFixed(4)) });
     this.refreshBalance().catch(() => {});
     return result;
     } finally {
