@@ -6177,7 +6177,10 @@ async function loadDaxChatStatus() {
     daxc.status = null;
   }
   const st = document.getElementById('dc-status');
-  if (st) st.textContent = daxc.status?.ai ? 'Online · reads all your trades' : 'Basic mode · add ANTHROPIC_API_KEY for full chat';
+  if (st) {
+    st.textContent = daxc.status?.ai ? 'Online · reads all your trades' : 'Basic mode · no API key';
+    st.title = daxc.status?.ai ? '' : 'Add ANTHROPIC_API_KEY (Railway variables or your .env) for full chat';
+  }
   document.getElementById('dax-fab')?.classList.toggle('is-basic', !daxc.status?.ai);
 }
 
