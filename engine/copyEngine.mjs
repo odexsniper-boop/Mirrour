@@ -130,7 +130,10 @@ function closedSol(p, boughtUsd, soldUsd) {
 
 /** Settings safe to send to the browser: integration secrets removed. */
 export function publicSettings(settings) {
-  if (!settings?.integrations) return settings;
+  if (!settings) return settings;
+  // the Dax report link's secret never leaves the server (the page only learns that one exists)
+  if (settings.daxShare) settings = { ...settings, daxShare: { enabled: Boolean(settings.daxShare.token), createdAt: settings.daxShare.createdAt || null } };
+  if (!settings.integrations) return settings;
   const { telegram = {}, discord = {} } = settings.integrations;
   return {
     ...settings,

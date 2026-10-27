@@ -565,7 +565,49 @@ async function readStatic(filePath) {
   return entry;
 }
 
+// Secret Dax report link (read-only, no password): /dax-report/<token>?period=24h|today|7d|all
+// Only this one report opens with it — trading, settings and everything else stay password
+// protected. Created / turned off on the Dax page; DAX_REPORT_TOKEN (Railway) also works.
+function daxShareToken() {
+  const env = String(process.env.DAX_REPORT_TOKEN || '').trim();
+  if (env.length >= 24) return env;
+  const t = engine.settings.daxShare?.token;
+  return typeof t === 'string' && t.length >= 24 ? t : null;
+}
+function daxShareMatches(given) {
+  const want = daxShareToken();
+  if (!want || !given) return false;
+  const a = Buffer.from(String(given));
+  const b = Buffer.from(want);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+const daxShareHits = [];
+function daxShareRoute(req, res) {
+  const url = new URL(req.url || '/', 'http://x');
+  const m = url.pathname.match(/^\/dax-report\/([A-Za-z0-9_-]{24,128})\/?$/);
+  if (!m) return false;
+  const now = Date.now();
+  while (daxShareHits.length && now - daxShareHits[0] > 60_000) daxShareHits.shift();
+  if (req.method !== 'GET' || !daxShareMatches(m[1])) {
+    res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+    res.end('Not found');
+    return true;
+  }
+  if (daxShareHits.length >= 30) {
+    res.writeHead(429, { 'Content-Type': 'text/plain; charset=utf-8', 'Retry-After': '60' });
+    res.end('Too many requests — try again in a minute');
+    return true;
+  }
+  daxShareHits.push(now);
+  const period = ['today', '24h', '7d', 'all'].includes(url.searchParams.get('period')) ? url.searchParams.get('period') : '24h';
+  const rep = daxReport(period);
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex', 'Referrer-Policy': 'no-referrer' });
+  res.end(rep.markdown);
+  return true;
+}
+
 export const server = http.createServer(async (req, res) => {
+  if (String(req.url || '').startsWith('/dax-report/') && daxShareRoute(req, res)) return;
   if (!passwordOk(req)) {
     res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="Odex Mirror", charset="UTF-8"', 'Content-Type': 'text/plain; charset=utf-8' });
     return res.end('Password required');
@@ -879,6 +921,20 @@ export const server = http.createServer(async (req, res) => {
       const anyApp = sent.telegram !== null || sent.discord !== null;
       if (!anyApp) return sendJson(res, 400, { ok: false, error: 'Connect Telegram or Discord first (Settings → Integrations).' });
       return sendJson(res, 200, { ok: Boolean(sent.telegram || sent.discord), sent });
+    }
+    // Secret report link: create (or replace) / turn off. The full link is shown once, to you.
+    if (req.method === 'POST' && pathname === '/api/dax/share') {
+      const body = await readJsonBody(req);
+      if (body.enabled === false) {
+        engine.settings.daxShare = null;
+        engine.emit('settings_updated', {});
+        return sendJson(res, 200, { ok: true, enabled: Boolean(process.env.DAX_REPORT_TOKEN), envToken: Boolean(process.env.DAX_REPORT_TOKEN) });
+      }
+      const token = randomUUID().replace(/-/g, '') + randomUUID().replace(/-/g, '').slice(0, 8);
+      engine.settings.daxShare = { token, createdAt: Date.now() };
+      engine.emit('settings_updated', {});
+      const host = process.env.RAILWAY_PUBLIC_DOMAIN ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}` : `http://${req.headers.host || `localhost:${PORT}`}`;
+      return sendJson(res, 200, { ok: true, enabled: true, url: `${host}/dax-report/${token}?period=24h` });
     }
     if (req.method === 'POST' && pathname === '/api/dax/settings') {
       const body = await readJsonBody(req);

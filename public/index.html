@@ -982,6 +982,12 @@
           <button type="button" class="btn btn-sm" id="dax-send" onclick="sendDaxReport()">Send to Telegram / Discord</button>
           <button type="button" class="btn btn-sm" onclick="loadDax()" title="Write the report again with the latest trades">Refresh</button>
         </div>
+        <div class="dax-share" id="dax-share">
+          <button type="button" class="btn btn-sm" id="dax-share-btn" onclick="createDaxShare()" title="A secret link that opens only this report, without the site password — for Claude">Create report link for Claude</button>
+          <span class="dax-share-url mono" id="dax-share-url" hidden></span>
+          <button type="button" class="btn btn-sm" id="dax-share-copy" onclick="copyDaxShare()" hidden>Copy link</button>
+          <button type="button" class="btn btn-sm" id="dax-share-off" onclick="disableDaxShare()" hidden>Turn off link</button>
+        </div>
         <div class="dax-daily">
           <label class="switch-row"><input type="checkbox" class="rule-toggle" id="dax-daily" onchange="saveDaxDaily()" /><span><b>Daily report</b> to Telegram / Discord at</span></label>
           <select id="dax-hour" class="input dax-hour" onchange="saveDaxDaily()"></select>

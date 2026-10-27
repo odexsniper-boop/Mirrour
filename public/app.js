@@ -6060,7 +6060,59 @@ window.loadDax = async function loadDax(period) {
   }
 };
 
+function renderDaxShare() {
+  const on = Boolean(engineState?.settings?.daxShare?.enabled);
+  const btn = document.getElementById('dax-share-btn');
+  const off = document.getElementById('dax-share-off');
+  const url = document.getElementById('dax-share-url');
+  const copy = document.getElementById('dax-share-copy');
+  if (btn) btn.textContent = on ? 'New report link' : 'Create report link for Claude';
+  if (off) off.hidden = !on;
+  if (url) {
+    url.hidden = !dax.shareUrl;
+    url.textContent = dax.shareUrl || '';
+  }
+  if (copy) copy.hidden = !dax.shareUrl;
+  if (on && !dax.shareUrl && url) {
+    url.hidden = false;
+    url.textContent = 'A report link is on (shown only when created — press New report link to get a fresh one)';
+  }
+}
+window.createDaxShare = async function createDaxShare() {
+  try {
+    const d = await (await fetch('/api/dax/share', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).json();
+    if (!d.ok) return showToast(d.error || 'Could not create the link', 'danger');
+    dax.shareUrl = d.url;
+    if (engineState?.settings) engineState.settings.daxShare = { enabled: true };
+    renderDaxShare();
+    copyDaxShare();
+  } catch {
+    showToast('Could not create the link', 'danger');
+  }
+};
+window.copyDaxShare = async function copyDaxShare() {
+  if (!dax.shareUrl) return;
+  try {
+    await navigator.clipboard.writeText(dax.shareUrl);
+    showToast('Report link copied — paste it to Claude. Anyone with it can read this report.', 'good');
+  } catch {
+    showToast('Copy the link from the box', 'good');
+  }
+};
+window.disableDaxShare = async function disableDaxShare() {
+  try {
+    await fetch('/api/dax/share', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled: false }) });
+    dax.shareUrl = null;
+    if (engineState?.settings) engineState.settings.daxShare = null;
+    renderDaxShare();
+    showToast('Report link turned off — the old link no longer works', 'good');
+  } catch {
+    showToast('Could not turn the link off', 'danger');
+  }
+};
+
 function renderDax() {
+  renderDaxShare();
   const r = dax.report;
   if (!r) return;
   const tone = { bad: 'bad', warn: 'warn', good: 'good' };

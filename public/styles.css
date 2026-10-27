@@ -6899,3 +6899,6 @@ body.logged-out .dax-fab,body.logged-out .dax-chat{display:none!important}
 
 .bw-rent{margin-top:6px;font-size:11.5px;color:var(--text-dim)}
 .bw-rent b{color:var(--green-bright);font-weight:600}
+
+.dax-share{display:flex;align-items:center;gap:8px;flex-wrap:wrap;width:100%}
+.dax-share-url{font-size:11.5px;color:var(--text-dim);background:var(--card-sub);border:1px solid var(--border);border-radius:8px;padding:5px 9px;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0;flex:1 1 260px}
