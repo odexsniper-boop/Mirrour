@@ -696,3 +696,37 @@ test('daily / per-buy SOL limits set on the dashboard win over the Railway varia
   assert.equal(trader.caps.maxSolPerDay, 2, 'cleared → variable again');
   assert.equal(trader.caps.reserveSol, 0.02, 'fee reserve is not changeable from the dashboard');
 });
+
+test('entry ceiling: max chase caps the real fill price, not only the quote', async () => {
+  const run = async (tokenPriceUsd, chase) => {
+    const { w, trader, lastOrder } = world({ tokenPriceUsd });
+    const { e, f } = engineFor(trader);
+    f.maxChasePct = chase;
+    const [r] = await e.processTraderSignal(buySig(f, 0.00002)); // trader paid $0.00002 per token
+    return { w, e, r, lastOrder };
+  };
+  const ceiling = 0.00002 * 1.2;
+  // quote ~+1% above the trader: 15% slippage still fits under the +20% ceiling → one quote
+  let x = await run(0.00002, 20);
+  assert.equal(x.e.positions.length, 1);
+  assert.equal(x.w.orders, 1);
+  assert.equal(x.lastOrder.slippageBps, '1500');
+  // quote ~+13% above: slippage cut to what is left (~5.7%) and re-quoted, worst fill ≤ ceiling
+  x = await run(0.0000224, 20);
+  assert.equal(x.e.positions.length, 1, JSON.stringify(x.r));
+  assert.equal(x.w.orders, 2, 'one fresh quote at the tighter slippage');
+  const bps = Number(x.lastOrder.slippageBps);
+  assert.ok(bps >= 500 && bps <= 600, `slippage ${bps} bps`);
+  const quotePx = 0.0000224 / 0.99;
+  assert.ok(quotePx / (1 - bps / 10000) <= ceiling * 1.0001, 'worst possible fill stays under the ceiling');
+  // quote ~+19.7% above: no room left → skipped, nothing sent
+  x = await run(0.0000237, 20);
+  assert.equal(x.e.positions.length, 0);
+  assert.equal(x.w.sent.length, 0);
+  assert.match(x.r.reason, /more than your 20% max chase above the trader's price/);
+  // "Copy every trade" (no chase limit): no ceiling, normal slippage
+  x = await run(0.0000224, 1000);
+  assert.equal(x.e.positions.length, 1);
+  assert.equal(x.w.orders, 1);
+  assert.equal(x.lastOrder.slippageBps, '1500');
+});

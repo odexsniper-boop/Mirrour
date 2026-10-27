@@ -829,6 +829,37 @@ export class CopyTradingEngine {
       });
     }
 
+    // Real buys: max chase is a hard price CEILING for the fill, not only a check on the quote.
+    // The swap's allowed slippage is cut so the fill can never land more than max chase above the
+    // trader's own price (a quote 10% above them with 15% slippage could otherwise fill +26%).
+    // No room left → skipped. One fresh quote at the tighter slippage when needed.
+    const maxChase = this.maxChaseFor(follow);
+    let entryCeilingUsd = null;
+    if (real && Number(token.traderFillPriceUsd) > 0 && maxChase < 1000) {
+      entryCeilingUsd = Number(token.traderFillPriceUsd) * (1 + maxChase / 100);
+      // Jupiter's slippage is a minimum token amount: s% fewer tokens = paying up to 1/(1−s) more.
+      // Largest slippage that keeps the fill at or under the ceiling: 1 − quote/ceiling.
+      const roomFor = (q) => (1 - Number(q.quotedPriceUsd) / entryCeilingUsd) * 100;
+      const tooHigh = (gap) => {
+        if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
+        return this.recordSkip({ dryRun, follow, wallet, signal, reason: `price moved too far before we could copy — the fill could land more than your ${maxChase}% max chase above the trader's price`, chaseGapPct: Number(gap.toFixed(2)) });
+      };
+      let room = roomFor(quote);
+      if (!(room >= 0.5)) return tooHigh(chaseGapPct);
+      if (room < buySlippagePct && !dryRun) {
+        buySlippagePct = Math.max(0.5, Math.floor(room * 10) / 10);
+        try {
+          quote = await this.adapter.getSwapQuote({ chainId: follow.chainId, side: 'buy', token: quoteToken, amountUsd: desiredUsd, slippagePct: buySlippagePct, paper, assetMode: buyAssetMode });
+        } catch (err) {
+          return this.recordSkip({ dryRun, follow, wallet, signal, reason: `real quote failed: ${err.message}` });
+        }
+        room = roomFor(quote);
+        const gap2 = ((Number(quote.quotedPriceUsd) - Number(token.traderFillPriceUsd)) / Number(token.traderFillPriceUsd)) * 100;
+        // the price kept running while we re-quoted: the new quote + its slippage must still fit
+        if (!(room >= buySlippagePct - 0.05)) return tooHigh(gap2);
+      } else if (room < buySlippagePct) buySlippagePct = Math.max(0.5, Math.floor(room * 10) / 10);
+    }
+
     if (dryRun) {
       return {
         status: 'would_copy',
