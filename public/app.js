@@ -5721,6 +5721,7 @@ window.openEditFollowModal = function openEditFollowModal(id) {
   const ms = document.getElementById('ef-mirror-sells');
   if (ms) ms.checked = f.mirrorSells === true;
   set('ef-max-sol-day', f.maxRealSolPerDay ?? '');
+  set('ef-reentry', f.reentryCooldownMin ?? '');
   loadEditFollowSolLimits(f);
   syncEditFollowCopyAll();
   onEditFollowSizing();
@@ -5790,7 +5791,12 @@ window.saveEditFollow = async function saveEditFollow() {
     copyTopUps: val('ef-topups') === '' ? null : val('ef-topups') === 'true',
     mirrorSells: Boolean(document.getElementById('ef-mirror-sells')?.checked),
     maxRealSolPerDay: num('ef-max-sol-day'),
+    reentryCooldownMin: num('ef-reentry'),
   };
+  if (body.reentryCooldownMin !== null && !(body.reentryCooldownMin >= 0 && body.reentryCooldownMin <= 1440)) {
+    msg.textContent = 'Skip re-entries must be 0–1440 minutes (leave it empty to copy every re-entry).';
+    return;
+  }
   if (body.maxRealSolPerDay !== null && !(body.maxRealSolPerDay > 0)) {
     msg.textContent = "The trader's daily SOL limit must be above 0 (leave it empty for no limit).";
     return;

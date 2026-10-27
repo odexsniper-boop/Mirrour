@@ -353,7 +353,7 @@ export const daxChat = new DaxChat({
       const rt = realTrader.status();
       return {
         mode: engine.settings.paperTrading ? 'paper' : 'real SOL',
-        traders: engine.follows.map((f) => ({ name: f.handle, wallet: f.traderWallet, status: f.status, pauseReason: f.pauseDetail || null, mode: f.mode, sellsWhenTraderSells: Boolean(f.mirrorSells), size: f.sizing, stopLossPct: f.slPct ?? null, takeProfitPct: f.tpPct ?? null, maxChasePct: f.maxChasePct ?? engine.settings.maxChasePct ?? null, copyTopUps: f.copyTopUps ?? null, realSolPerDay: f.maxRealSolPerDay ?? null, exitRules: f.exitRules })),
+        traders: engine.follows.map((f) => ({ name: f.handle, wallet: f.traderWallet, status: f.status, pauseReason: f.pauseDetail || null, mode: f.mode, sellsWhenTraderSells: Boolean(f.mirrorSells), size: f.sizing, stopLossPct: f.slPct ?? null, takeProfitPct: f.tpPct ?? null, maxChasePct: f.maxChasePct ?? engine.settings.maxChasePct ?? null, copyTopUps: f.copyTopUps ?? null, realSolPerDay: f.maxRealSolPerDay ?? null, skipReentriesForMin: f.reentryCooldownMin ?? null, exitRules: f.exitRules })),
         realTrading: rt.configured ? { wallet: rt.address, balanceSol: rt.balance?.sol ?? null, perBuySol: rt.caps?.maxSolPerTrade, perDaySol: rt.caps?.maxSolPerDay, usedLast24hSol: rt.spent24hSol, keptForFeesSol: rt.caps?.reserveSol } : 'bot wallet not set up',
       };
     },
@@ -1155,6 +1155,13 @@ export const server = http.createServer(async (req, res) => {
           follow.maxChasePct = v;
         }
         if (body.copyTopUps !== undefined) follow.copyTopUps = body.copyTopUps === null || body.copyTopUps === '' ? null : Boolean(body.copyTopUps);
+        // re-entry rule: minutes after our copy of a coin closed during which the trader's new buys of
+        // that same coin are not copied (empty / 0 = off)
+        if (body.reentryCooldownMin !== undefined) {
+          const v = body.reentryCooldownMin === null || body.reentryCooldownMin === '' ? null : Number(body.reentryCooldownMin);
+          if (v !== null && !(Number.isFinite(v) && v >= 0 && v <= 1440)) return sendJson(res, 400, { ok: false, error: 'The re-entry rule must be 0–1440 minutes (empty = off).' });
+          follow.reentryCooldownMin = v || null;
+        }
         // this trader's own daily real-SOL limit (empty = none; the overall daily limit still applies)
         if (body.maxRealSolPerDay !== undefined) {
           const v = body.maxRealSolPerDay === null || body.maxRealSolPerDay === '' ? null : Number(body.maxRealSolPerDay);

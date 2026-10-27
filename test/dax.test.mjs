@@ -100,3 +100,22 @@ test('DX3 the trader log is saved and restored with the engine, and trimmed to 7
   e2.logTraderTrade({ wallet: DECU, tokenMint: 'X', side: 'buy', backfill: true }, []);
   assert.equal(e2.traderLog.length, n);
 });
+
+test('DX4 Dax numbers first entries and re-entries and compares them', () => {
+  const { e, f } = world();
+  const mint = 'Goon1111111111111111111111111111111111pump';
+  const mk = (id, openedAgo, pnl) => {
+    e.positions.push({ id, followId: f.id, traderHandle: 'Decu', traderWallet: f.traderWallet, chainId: 'solana', isPaper: false, tokenAddress: mint, symbol: 'gooning', initialCostUsd: 10, soldUsd: 10 + pnl, remainingTokens: 0, initialTokens: 1e6, entryPriceUsd: 1e-5, peakPriceUsd: 1e-5, openedAt: min(openedAgo), closedAt: min(openedAgo - 1), closeCause: pnl > 0 ? 'initials taken off' : 'floor hit' });
+  };
+  mk('g1', 49, -2.89);
+  mk('g2', 48, 0.91);
+  mk('g3', 46, -3.63);
+  const r = buildDaxReport({ engine: e, live: { signals: [] } }, { period: '24h', now: NOW });
+  const g = r.data.closed.filter((c) => c.sym === 'gooning').sort((a, b) => a.openedAt - b.openedAt);
+  assert.deepEqual(g.map((c) => c.entryNo), [1, 2, 3]);
+  assert.equal(r.data.entries.real.re.n, 2);
+  assert.ok(Math.abs(r.data.entries.real.re.pnl - (0.91 - 3.63)) < 1e-9);
+  assert.match(r.markdown, /## First entries vs re-entries/);
+  assert.match(r.findings.map((x) => x.text).join('\n'), /Real re-entries .*2 trades, 50% won/);
+  assert.ok(r.markdown.includes(',real,Decu,gooning,' + mint + ',2,'), 'entry number in the CSV');
+});

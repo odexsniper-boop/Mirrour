@@ -1202,6 +1202,13 @@
           <input type="number" id="ef-max-sol-day-all" class="input mono" min="0" step="any" placeholder="Loading…" />
         </div>
       </div>
+      <div class="form-row">
+        <div class="field">
+          <label for="ef-reentry" title="When the trader sells out of a coin and buys it again, don't copy that new buy if our last copy of the coin closed less than this many minutes ago">Skip re-entries for (minutes)</label>
+          <input type="number" id="ef-reentry" class="input mono" min="0" max="1440" step="1" placeholder="Off — every re-entry is copied" />
+        </div>
+        <div class="field"></div>
+      </div>
       <div class="ef-hint" id="ef-sol-day-hint">Real buys stop for the day once a limit is used up (rolling 24 h). Sells are never blocked.</div>
       <div class="ef-hint is-warn" id="ef-copyall-hint" hidden>Every buy is copied, even when the price already ran far past the trader's — late entries can lose money. A stop loss is recommended.</div>
       <div class="ef-msg" id="ef-msg" role="status"></div>

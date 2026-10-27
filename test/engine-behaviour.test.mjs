@@ -644,3 +644,36 @@ test('FT6 fast exit checks reuse a DexScreener price for 1.5 s instead of asking
   await e.fetchLivePrices([M]);
   assert.equal(calls, 2);
 });
+
+// ---------------------------------------------------------------------------
+// Re-entry rule: the trader sold out and bought the same coin again
+// ---------------------------------------------------------------------------
+test('RE1 re-entry rule skips a new buy of a coin our copy closed N minutes ago; off = copied; later = copied', async () => {
+  const e = makeEngine();
+  e.settings.cooldown.enabled = false;
+  const f = addFollow(e, { reentryCooldownMin: 10 });
+  const { position: p } = await open(e, f);
+  await e.executePositionSell(p.id, { sellPct: 100, cause: 'floor hit' });
+  assert.equal(p.remainingTokens, 0);
+  // the trader sells out (Auto-Exit ignores the sell, but their position cycle ends) ...
+  await e.processTraderSignal(traderSell(f, p, 100));
+  // ... and buys the same coin again
+  const again = () => e.processTraderSignal(buySignal(f, { address: p.tokenAddress, symbol: p.symbol }));
+  let [r] = await again();
+  assert.equal(r.status, 'skipped');
+  assert.match(r.reason, /re-entry skipped — our last copy of this coin closed 1 min ago \(re-entry rule: 10 min\)/);
+  // 11 minutes later it is a fresh entry again
+  p.closedAt = Date.now() - 11 * 60_000;
+  e.endCopiedCycle(f.id, p.tokenAddress);
+  [r] = await again();
+  assert.equal(r.status, 'filled', JSON.stringify(r));
+  // rule off: copied right away
+  const e2 = makeEngine();
+  e2.settings.cooldown.enabled = false;
+  const f2 = addFollow(e2, { reentryCooldownMin: null });
+  const { position: q } = await open(e2, f2);
+  await e2.executePositionSell(q.id, { sellPct: 100, cause: 'floor hit' });
+  await e2.processTraderSignal(traderSell(f2, q, 100));
+  const [r2] = await e2.processTraderSignal(buySignal(f2, { address: q.tokenAddress, symbol: q.symbol }));
+  assert.equal(r2.status, 'filled');
+});

@@ -115,6 +115,27 @@ export function buildDaxReport(ctx, { period = '24h', now = Date.now() } = {}) {
   const paper = engine.pnlSummary({ from: P.from, to: P.to, paper: true });
 
   // ---------- closed trades in the period (kept 2 days on the server) ----------
+  // entry number per copy: 1 = our first copy of this coin from this trader, 2+ = a re-entry after
+  // an earlier copy of the same coin (within 6 h) — numbered over every position on record
+  const entryNo = new Map();
+  {
+    const groups = new Map();
+    for (const p of engine.positions || []) {
+      const k = `${p.followId}|${p.tokenAddress}|${p.isPaper === false ? 'r' : 'p'}`;
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(p);
+    }
+    for (const list of groups.values()) {
+      list.sort((a, b) => (a.openedAt || 0) - (b.openedAt || 0));
+      let n = 0;
+      let prevAt = 0;
+      for (const p of list) {
+        n = prevAt && (p.openedAt || 0) - prevAt <= 6 * HOUR ? n + 1 : 1;
+        prevAt = p.openedAt || 0;
+        entryNo.set(p.id, n);
+      }
+    }
+  }
   const closed = (engine.positions || [])
     .filter((p) => p.remainingTokens <= 0 && inP(p.closedAt || p.lastSellAt))
     .map((p) => {
@@ -128,6 +149,7 @@ export function buildDaxReport(ctx, { period = '24h', now = Date.now() } = {}) {
         cause: p.closeCause || null, openedAt: p.openedAt, closedAt: p.closedAt || p.lastSellAt,
         heldSec: p.closedAt && p.openedAt ? (p.closedAt - p.openedAt) / 1000 : null,
         entrySlipPct: num(p.entrySlipPct), exitSlipPct: num(p.exitSlipPct), lagSec: num(p.detectLagSec), peakPct,
+        entryNo: entryNo.get(p.id) || 1,
       };
     })
     .sort((a, b) => a.closedAt - b.closedAt);
@@ -190,6 +212,17 @@ export function buildDaxReport(ctx, { period = '24h', now = Date.now() } = {}) {
     g.pnl += c.pnl;
     g.pcts.push(c.pnlPct);
     causes.set(k, g);
+  }
+
+  // ---------- first entries vs re-entries ----------
+  const entryStats = (list) => {
+    const wins = list.filter((c) => c.pnl > 0).length;
+    return { n: list.length, wins, winRate: list.length ? (wins / list.length) * 100 : null, pnl: sum(list.map((c) => c.pnl)), avgPct: list.length ? sum(list.map((c) => c.pnlPct)) / list.length : null };
+  };
+  const entries = {};
+  for (const kind of ['real', 'paper']) {
+    const mine = closed.filter((c) => c.real === (kind === 'real'));
+    entries[kind] = { first: entryStats(mine.filter((c) => c.entryNo === 1)), re: entryStats(mine.filter((c) => c.entryNo > 1)) };
   }
 
   // ---------- speed ----------
@@ -259,6 +292,13 @@ export function buildDaxReport(ctx, { period = '24h', now = Date.now() } = {}) {
     }
     if (t.follow.status !== 'copying') add('warn', `${h} is ${t.follow.status}${t.follow.pauseDetail ? ` (${t.follow.pauseDetail})` : ''} — nothing new is copied from this trader.`);
   }
+  for (const kind of ['real', 'paper']) {
+    const e = entries[kind];
+    if (e.re.n >= 2) {
+      const worse = e.re.avgPct < e.first.avgPct - 5;
+      add(worse && e.re.pnl < 0 ? 'warn' : 'info', `${kind === 'real' ? 'Real' : 'Paper'} re-entries (the trader sold out and bought the same coin again): ${e.re.n} trades, ${Math.round(e.re.winRate)}% won, ${usd(e.re.pnl)} (avg ${pct(e.re.avgPct, 0)}) vs first entries ${e.first.n} trades, ${e.first.winRate == null ? '—' : Math.round(e.first.winRate) + '%'} won, ${usd(e.first.pnl)} (avg ${pct(e.first.avgPct, 0)}).${worse && e.re.pnl < 0 ? ' Re-entries lose more — consider "Skip re-entries for" ~10 min in the trader Settings.' : ''}`);
+    }
+  }
   const lostCauses = [...causes.values()].filter((g) => g.real && g.pnl < 0).sort((a, b) => a.pnl - b.pnl);
   if (lostCauses.length) add('info', `Real losses by exit: ${lostCauses.map((g) => `${g.cause} ${usd(g.pnl)} over ${g.n}`).join('; ')}.`);
   if (speed.detectSec != null && speed.detectSec >= 4) add('warn', `Trades are spotted ~${speed.detectSec} s after the trader on average — slow for fast coins. A paid Helius plan switches on the faster token feed (~1 s).`);
@@ -301,7 +341,7 @@ export function buildDaxReport(ctx, { period = '24h', now = Date.now() } = {}) {
       r.hardTimeCap?.enabled ? `cap ${secs(r.hardTimeCap.timeCapSec)}` : null,
     ].filter(Boolean);
     L.push(`### @${f.handle || short(f.traderWallet)} (${short(f.traderWallet)}) — ${f.status}`);
-    L.push(`- Setup: ${f.mode}${f.mode === 'auto-exit' ? ` [${rules.join(', ') || 'no rules'}]${f.mirrorSells ? ' + sells when trader sells' : ''}` : ''} · ${f.sizing?.type === 'fixed' ? `$${f.sizing.amount} per copy` : `${f.sizing?.type} ${f.sizing?.amount}`}${f.slPct ? ` · SL ${f.slPct}%` : ''}${f.maxChasePct ? ` · max chase ${f.maxChasePct}%` : ''}${f.copyTopUps != null ? ` · top-ups ${f.copyTopUps ? 'on' : 'off'}` : ''}${f.maxRealSolPerDay ? ` · ${f.maxRealSolPerDay} SOL/day` : ''}`);
+    L.push(`- Setup: ${f.mode}${f.mode === 'auto-exit' ? ` [${rules.join(', ') || 'no rules'}]${f.mirrorSells ? ' + sells when trader sells' : ''}` : ''} · ${f.sizing?.type === 'fixed' ? `$${f.sizing.amount} per copy` : `${f.sizing?.type} ${f.sizing?.amount}`}${f.slPct ? ` · SL ${f.slPct}%` : ''}${f.maxChasePct ? ` · max chase ${f.maxChasePct}%` : ''}${f.copyTopUps != null ? ` · top-ups ${f.copyTopUps ? 'on' : 'off'}` : ''}${f.maxRealSolPerDay ? ` · ${f.maxRealSolPerDay} SOL/day` : ''}${f.reentryCooldownMin ? ` · re-entries skipped for ${f.reentryCooldownMin} min` : ''}`);
     L.push(`- Trader buys seen ${t.buysSeen} · copied ${t.copiedBuys} · skipped ${t.missedBuys}`);
     if (t.reasons.length) L.push(`- Skip reasons: ${t.reasons.slice(0, 6).map(([k, n]) => `${k} ×${n}`).join(' · ')}`);
     const sc = t.scorecard;
@@ -326,6 +366,17 @@ export function buildDaxReport(ctx, { period = '24h', now = Date.now() } = {}) {
     for (const o of overshoots) L.push(`| $${o.sym} | ${o.real ? 'real' : 'paper'} | ${o.cause} | −${o.limitPct}% | ${pct(o.pnlPct, 1)} | ${o.overPct.toFixed(1)} pts (${usdPlain(o.overUsd)}) |`);
     L.push('');
   }
+  if (entries.real.re.n || entries.paper.re.n) {
+    L.push('## First entries vs re-entries');
+    L.push('| Kind | Entry | Trades | Won | Result | Avg |');
+    L.push('|---|---|---|---|---|---|');
+    for (const kind of ['real', 'paper']) {
+      for (const [label, st] of [['first', entries[kind].first], ['re-entry', entries[kind].re]]) {
+        if (st.n) L.push(`| ${kind} | ${label} | ${st.n} | ${Math.round(st.winRate)}% | ${usd(st.pnl)} | ${pct(st.avgPct, 1)} |`);
+      }
+    }
+    L.push('');
+  }
   if (causes.size) {
     L.push('## By exit');
     L.push('| Kind | Exit | Trades | Result | Avg |');
@@ -347,8 +398,8 @@ export function buildDaxReport(ctx, { period = '24h', now = Date.now() } = {}) {
   if (closed.length) {
     L.push('## All closed trades (for analysis)');
     L.push('```');
-    L.push('closed_utc,kind,trader,coin,mint,cost_usd,pnl_usd,pnl_pct,exit,held_s,peak_pct,entry_slip_pct,exit_slip_pct,seen_late_s');
-    for (const c of closed) L.push([iso(c.closedAt), c.real ? 'real' : 'paper', c.trader || '', c.sym, c.mint, c.cost.toFixed(2), c.pnl.toFixed(2), c.pnlPct.toFixed(1), (c.cause || '').replace(/,/g, ' '), c.heldSec != null ? Math.round(c.heldSec) : '', c.peakPct != null ? c.peakPct.toFixed(1) : '', c.entrySlipPct ?? '', c.exitSlipPct ?? '', c.lagSec ?? ''].join(','));
+    L.push('closed_utc,kind,trader,coin,mint,entry_no,cost_usd,pnl_usd,pnl_pct,exit,held_s,peak_pct,entry_slip_pct,exit_slip_pct,seen_late_s');
+    for (const c of closed) L.push([iso(c.closedAt), c.real ? 'real' : 'paper', c.trader || '', c.sym, c.mint, c.entryNo, c.cost.toFixed(2), c.pnl.toFixed(2), c.pnlPct.toFixed(1), (c.cause || '').replace(/,/g, ' '), c.heldSec != null ? Math.round(c.heldSec) : '', c.peakPct != null ? c.peakPct.toFixed(1) : '', c.entrySlipPct ?? '', c.exitSlipPct ?? '', c.lagSec ?? ''].join(','));
     L.push('```');
   }
   L.push('');
@@ -365,7 +416,7 @@ export function buildDaxReport(ctx, { period = '24h', now = Date.now() } = {}) {
   return {
     period: P,
     generatedAt: now,
-    data: { real, paper, closed, overshoots, speed, wallet, traders: traders.map((t) => ({ followId: t.follow.id, handle: t.follow.handle, buysSeen: t.buysSeen, copiedBuys: t.copiedBuys, missedBuys: t.missedBuys, reasons: t.reasons, vs: t.vs, missedCoins: t.missedCoins })) },
+    data: { real, paper, closed, overshoots, speed, wallet, entries, traders: traders.map((t) => ({ followId: t.follow.id, handle: t.follow.handle, buysSeen: t.buysSeen, copiedBuys: t.copiedBuys, missedBuys: t.missedBuys, reasons: t.reasons, vs: t.vs, missedCoins: t.missedCoins })) },
     findings,
     markdown,
     summaryText,

@@ -600,6 +600,22 @@ export class CopyTradingEngine {
       return this.recordSkip({ dryRun, follow, wallet, signal, reason: "trader's first buy was too late to copy — their top-ups are skipped too (top-ups not copied)" });
     }
 
+    // Re-entry rule (trader Settings, off by default): the trader sold out and bought the same coin
+    // again — skip it when our last copy of this coin closed less than N minutes ago
+    const reentryMin = Number(follow.reentryCooldownMin);
+    if (reentryMin > 0 && token.address) {
+      const wantPaper = Boolean(this.settings.paperTrading);
+      const lastClose = this.positions
+        .filter((p) => p.followId === follow.id && p.tokenAddress === token.address && p.remainingTokens <= 0 && Boolean(p.isPaper) === wantPaper)
+        .reduce((m, p) => Math.max(m, Number(p.closedAt || p.lastSellAt) || 0), 0);
+      if (lastClose && Date.now() - lastClose < reentryMin * 60_000) {
+        const ago = Math.max(1, Math.round((Date.now() - lastClose) / 60_000));
+        // their top-ups of this skipped re-entry are not copied as a (later) fresh entry either
+        if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
+        return this.recordSkip({ dryRun, follow, wallet, signal, reason: `re-entry skipped — our last copy of this coin closed ${ago} min ago (re-entry rule: ${reentryMin} min)` });
+      }
+    }
+
     if (traderBuyUsd < follow.minTradeUsd) {
       return this.recordSkip({ dryRun, follow, wallet, signal, reason: 'below your minimum' });
     }
