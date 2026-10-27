@@ -6019,9 +6019,9 @@ function daxMarkdownHtml(md) {
       const cells = (r) => r.replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
       const body = rows.filter((r, k) => k !== 1 || !/^\|[\s|:-]+\|$/.test(r));
       out.push(`<table><thead><tr>${cells(body[0]).map((c) => `<th>${inline(c)}</th>`).join('')}</tr></thead><tbody>${body.slice(1).map((r) => `<tr>${cells(r).map((c) => `<td>${inline(c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`);
-    } else if (l.startsWith('- ')) {
+    } else if (/^[-*•] /.test(l)) {
       const items = [];
-      for (; i < lines.length && lines[i].startsWith('- '); i++) items.push(`<li>${inline(lines[i].slice(2))}</li>`);
+      for (; i < lines.length && /^[-*•] /.test(lines[i]); i++) items.push(`<li>${inline(lines[i].slice(2))}</li>`);
       i -= 1;
       out.push(`<ul>${items.join('')}</ul>`);
     } else if (/^#{1,3} /.test(l)) {
@@ -6146,3 +6146,307 @@ window.saveDaxDaily = async function saveDaxDaily() {
     showToast('Could not save the daily report setting', 'danger');
   }
 };
+
+// ============================================================================
+// Dax chat: text, voice messages and hands-free voice calls
+// Voice uses the browser's own speech recognition + speech (Chrome / Edge); the answers come
+// from the server (Claude with read-only tools when ANTHROPIC_API_KEY is set, else basic mode).
+// ============================================================================
+const daxc = { open: false, msgs: [], busy: false, status: null, rec: null, recOn: false, call: null };
+const DAX_CHIPS = ['Why did my last real trades lose?', 'How did the trader do on the coins we lost?', 'What should I change in my settings?', 'How much SOL is left in the bot wallet?'];
+try {
+  const saved = JSON.parse(localStorage.getItem('odex.daxChat') || '[]');
+  if (Array.isArray(saved)) daxc.msgs = saved.slice(-40);
+} catch {
+  // storage unavailable: start fresh
+}
+function saveDaxChat() {
+  try {
+    localStorage.setItem('odex.daxChat', JSON.stringify(daxc.msgs.slice(-40)));
+  } catch {
+    // ignore
+  }
+}
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+const voiceSupported = Boolean(SpeechRec && window.speechSynthesis);
+
+async function loadDaxChatStatus() {
+  try {
+    daxc.status = await (await fetch('/api/dax/chat/status', { cache: 'no-store' })).json();
+  } catch {
+    daxc.status = null;
+  }
+  const st = document.getElementById('dc-status');
+  if (st) st.textContent = daxc.status?.ai ? 'Online · reads all your trades' : 'Basic mode · add ANTHROPIC_API_KEY for full chat';
+  document.getElementById('dax-fab')?.classList.toggle('is-basic', !daxc.status?.ai);
+}
+
+window.toggleDaxChat = function toggleDaxChat(force) {
+  daxc.open = typeof force === 'boolean' ? force : !daxc.open;
+  const box = document.getElementById('dax-chat');
+  const fab = document.getElementById('dax-fab');
+  if (box) box.hidden = !daxc.open;
+  if (fab) fab.setAttribute('aria-expanded', daxc.open ? 'true' : 'false');
+  if (daxc.open) {
+    loadDaxChatStatus();
+    renderDaxChat();
+    setTimeout(() => document.getElementById('dc-text')?.focus(), 30);
+  } else if (daxc.call) endDaxCall();
+  for (const id of ['dc-mic', 'dc-call-btn']) {
+    const b = document.getElementById(id);
+    if (b && !voiceSupported) {
+      b.disabled = true;
+      b.title = 'Voice needs Chrome or Edge (this browser has no speech recognition)';
+    }
+  }
+};
+
+function renderDaxChat(typing = false) {
+  const box = document.getElementById('dc-msgs');
+  if (!box) return;
+  const hello = `<div class="dc-msg dax">Hi, I'm Dax 👋 I read every trade, skip and exit the bot makes. Ask me why a trade lost, how a trader is doing, or what to change — type, send a voice message, or call me.</div>`;
+  box.innerHTML =
+    (daxc.msgs.length ? '' : hello) +
+    daxc.msgs
+      .map((m) => {
+        if (m.role === 'user') return `<div class="dc-msg me">${esc(m.text)}${m.voice ? '<span class="dc-meta">🎙 voice</span>' : ''}</div>`;
+        if (m.role === 'error') return `<div class="dc-msg err">${esc(m.text)}</div>`;
+        return `<div class="dc-msg dax">${daxMarkdownHtml(m.text).replace(/<table>/g, '<div class="dax-tbl-wrap"><table>').replace(/<\/table>/g, '</table></div>')}${m.mode === 'basic' ? '<span class="dc-meta">basic mode</span>' : ''}</div>`;
+      })
+      .join('') +
+    (typing ? '<div class="dc-typing"><img src="/dax/dax-side.png" alt="" />Dax is looking at your trades…</div>' : '');
+  box.scrollTop = box.scrollHeight;
+  const chips = document.getElementById('dc-chips');
+  if (chips) chips.innerHTML = daxc.msgs.length ? '' : DAX_CHIPS.map((c) => `<button type="button" onclick="sendDaxMessage(${esc(JSON.stringify(c))})">${esc(c)}</button>`).join('');
+  const send = document.getElementById('dc-send');
+  if (send) send.disabled = daxc.busy;
+}
+
+/** Ask Dax. Returns the reply text (or null). voice = short spoken-style answer. */
+async function askDax(text, { voice = false } = {}) {
+  daxc.msgs.push({ role: 'user', text, voice });
+  daxc.busy = true;
+  renderDaxChat(true);
+  let reply = null;
+  try {
+    const history = daxc.msgs.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ role: m.role, text: m.text }));
+    const r = await fetch('/api/dax/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: history, voice }) });
+    const d = await r.json().catch(() => ({}));
+    if (d.ok) {
+      reply = d.text;
+      daxc.msgs.push({ role: 'assistant', text: d.text, mode: d.mode });
+    } else daxc.msgs.push({ role: 'error', text: d.error || 'Dax could not answer.' });
+  } catch {
+    daxc.msgs.push({ role: 'error', text: 'Dax could not be reached — check your connection.' });
+  } finally {
+    daxc.busy = false;
+    saveDaxChat();
+    renderDaxChat();
+  }
+  return reply;
+}
+
+window.sendDaxMessage = async function sendDaxMessage(preset) {
+  const ta = document.getElementById('dc-text');
+  const text = String(typeof preset === 'string' ? preset : ta?.value || '').trim();
+  if (!text || daxc.busy) return;
+  if (ta && typeof preset !== 'string') {
+    ta.value = '';
+    ta.style.height = 'auto';
+  }
+  await askDax(text);
+};
+
+window.clearDaxChat = function clearDaxChat() {
+  daxc.msgs = [];
+  saveDaxChat();
+  renderDaxChat();
+};
+
+// ---------- speech out ----------
+function daxVoice() {
+  const voices = window.speechSynthesis?.getVoices?.() || [];
+  const lang = (navigator.language || 'en').slice(0, 2);
+  return voices.find((v) => v.lang?.startsWith(lang) && /natural|neural|online|google/i.test(v.name)) || voices.find((v) => v.lang?.startsWith(lang)) || null;
+}
+function daxSpeak(text) {
+  return new Promise((resolve) => {
+    if (!window.speechSynthesis) return resolve();
+    const plain = String(text || '').replace(/[*_#`|>]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!plain) return resolve();
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(plain.slice(0, 1200));
+    const v = daxVoice();
+    if (v) u.voice = v;
+    u.lang = v?.lang || navigator.language || 'en-US';
+    u.rate = 1.03;
+    u.onend = () => resolve();
+    u.onerror = () => resolve();
+    window.speechSynthesis.speak(u);
+  });
+}
+
+// ---------- speech in ----------
+function listenOnce({ onInterim } = {}) {
+  return new Promise((resolve, reject) => {
+    if (!SpeechRec) return reject(new Error('unsupported'));
+    const rec = new SpeechRec();
+    rec.lang = navigator.language || 'en-US';
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.maxAlternatives = 1;
+    let final = '';
+    rec.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i++) {
+        if (e.results[i].isFinal) final += e.results[i][0].transcript;
+        else interim += e.results[i][0].transcript;
+      }
+      onInterim?.((final + ' ' + interim).trim());
+    };
+    rec.onerror = (e) => reject(new Error(e.error || 'speech error'));
+    rec.onend = () => resolve(final.trim());
+    try {
+      rec.start();
+    } catch (err) {
+      reject(err);
+    }
+    daxc.rec = rec;
+  });
+}
+function micErrorText(err) {
+  const m = String(err?.message || err);
+  if (/not-allowed|service-not-allowed|denied/i.test(m)) return 'Microphone blocked — allow microphone access for this site in the browser (lock icon in the address bar).';
+  if (/no-speech/i.test(m)) return null;
+  if (/unsupported/i.test(m)) return 'Voice needs Chrome or Edge.';
+  if (/network/i.test(m)) return "The browser's speech service could not be reached.";
+  return `Voice problem: ${m}`;
+}
+
+// Voice message: talk → it is sent → Dax answers in text and out loud
+window.toggleDaxDictation = async function toggleDaxDictation() {
+  const btn = document.getElementById('dc-mic');
+  const ta = document.getElementById('dc-text');
+  if (daxc.recOn) {
+    daxc.rec?.stop();
+    return;
+  }
+  if (daxc.busy) return;
+  daxc.recOn = true;
+  btn?.classList.add('is-rec');
+  if (ta) ta.placeholder = 'Listening… speak now';
+  try {
+    const said = await listenOnce({ onInterim: (t) => ta && (ta.value = t) });
+    if (ta) ta.value = '';
+    if (said) {
+      const reply = await askDax(said, { voice: true });
+      if (reply) daxSpeak(reply);
+    }
+  } catch (err) {
+    const t = micErrorText(err);
+    if (t) showToast(t, 'danger');
+  } finally {
+    daxc.recOn = false;
+    btn?.classList.remove('is-rec');
+    if (ta) ta.placeholder = 'Ask Dax about your trades…';
+  }
+};
+
+// Voice call: hands-free loop listen → Dax thinks → Dax speaks → listen again
+function setCallState(state, text) {
+  const face = document.getElementById('dc-call-face');
+  const img = document.getElementById('dc-call-img');
+  const st = document.getElementById('dc-call-state');
+  if (face) face.className = `dc-call-face ${state}`;
+  if (img) img.src = state === 'thinking' ? '/dax/dax-side.png' : '/dax/dax.png';
+  if (st) st.textContent = text;
+}
+window.startDaxCall = async function startDaxCall() {
+  if (!voiceSupported) return showToast('Voice calls need Chrome or Edge.', 'danger');
+  if (daxc.call) return;
+  const call = { active: true, muted: false };
+  daxc.call = call;
+  document.getElementById('dc-call').hidden = false;
+  const heard = document.getElementById('dc-call-heard');
+  setCallState('speaking', 'Dax');
+  await daxSpeak('Hi, Dax here. What do you want to know about your trades?');
+  let quiet = 0;
+  while (call.active) {
+    if (call.muted) {
+      setCallState('', 'Muted');
+      await new Promise((r) => setTimeout(r, 300));
+      continue;
+    }
+    setCallState('listening', 'Listening…');
+    let said = '';
+    try {
+      said = await listenOnce({ onInterim: (t) => heard && (heard.textContent = t) });
+    } catch (err) {
+      const t = micErrorText(err);
+      if (t) {
+        showToast(t, 'danger');
+        break;
+      }
+    }
+    if (!call.active) break;
+    if (!said) {
+      quiet += 1;
+      if (quiet >= 3) {
+        setCallState('speaking', 'Dax');
+        await daxSpeak("I'll hang up for now. Call me any time.");
+        break;
+      }
+      continue;
+    }
+    quiet = 0;
+    if (/^(bye|goodbye|hang up|end (the )?call|stop)\b/i.test(said)) {
+      setCallState('speaking', 'Dax');
+      await daxSpeak('Okay, talk soon.');
+      break;
+    }
+    if (heard) heard.textContent = `“${said}”`;
+    setCallState('thinking', 'Dax is checking your trades…');
+    const reply = await askDax(said, { voice: true });
+    if (!call.active) break;
+    setCallState('speaking', 'Dax');
+    if (heard) heard.textContent = reply || '';
+    await daxSpeak(reply || 'Sorry, I could not get an answer just now.');
+  }
+  endDaxCall();
+};
+window.endDaxCall = function endDaxCall() {
+  if (daxc.call) daxc.call.active = false;
+  daxc.call = null;
+  try {
+    daxc.rec?.abort();
+  } catch {
+    // ignore
+  }
+  window.speechSynthesis?.cancel();
+  const el = document.getElementById('dc-call');
+  if (el) el.hidden = true;
+  const m = document.getElementById('dc-call-mute');
+  if (m) {
+    m.classList.remove('on');
+    m.textContent = 'Mute';
+  }
+};
+window.toggleDaxCallMute = function toggleDaxCallMute() {
+  if (!daxc.call) return;
+  daxc.call.muted = !daxc.call.muted;
+  if (daxc.call.muted) {
+    try {
+      daxc.rec?.abort();
+    } catch {
+      // ignore
+    }
+  }
+  const m = document.getElementById('dc-call-mute');
+  if (m) {
+    m.classList.toggle('on', daxc.call.muted);
+    m.textContent = daxc.call.muted ? 'Unmute' : 'Mute';
+  }
+};
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && daxc.open && !document.querySelector('.modal-backdrop.open')) toggleDaxChat(false);
+});

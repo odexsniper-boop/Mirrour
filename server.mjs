@@ -19,6 +19,7 @@ import zlib from 'node:zlib';
 import { RealTrader } from './engine/realTrader.mjs';
 import { Notifier } from './engine/notifier.mjs';
 import { buildDaxReport } from './engine/dax.mjs';
+import { DaxChat, basicDaxAnswer, periodFromQuestion } from './engine/daxChat.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -285,6 +286,49 @@ function daxReport(period) {
 function daxFilename(rep) {
   return `dax-report-${rep.period.preset}-${new Date(rep.generatedAt).toISOString().slice(0, 16).replace(/[:T]/g, '-')}.md`;
 }
+// Dax chat (text / voice): Claude with READ-ONLY tools over the bot's records (needs ANTHROPIC_API_KEY)
+const daxAge = (t) => (t ? Math.round((Date.now() - t) / 1000) : null);
+export const daxChat = new DaxChat({
+  tools: {
+    get_report: ({ period }) => daxReport(['today', '24h', '7d', 'all'].includes(period) ? period : '24h').markdown,
+    get_open_positions: () =>
+      engine.positions
+        .filter((p) => p.remainingTokens > 0)
+        .map((p) => {
+          const f = engine.follows.find((x) => x.id === p.followId);
+          const value = (Number(p.remainingTokens) || 0) * (Number(p.currentPriceUsd) || 0);
+          return {
+            coin: p.symbol, mint: p.tokenAddress, kind: p.isPaper === false ? 'real' : 'paper', trader: p.traderHandle,
+            costUsd: Number((p.remainingCostUsd ?? p.initialCostUsd ?? 0).toFixed?.(2) ?? 0), valueUsd: Number(value.toFixed(2)),
+            pnlPct: p.entryPriceUsd > 0 && p.currentPriceUsd > 0 ? Number(((p.currentPriceUsd / p.entryPriceUsd - 1) * 100).toFixed(1)) : null,
+            peakPct: p.entryPriceUsd > 0 && p.peakPriceUsd > 0 ? Number(((p.peakPriceUsd / p.entryPriceUsd - 1) * 100).toFixed(1)) : null,
+            entryVsTraderPct: p.entrySlipPct ?? null, heldSec: daxAge(p.openedAt), stage: p.stage || null,
+            exitMode: f?.mode || null, sellsWhenTraderSells: Boolean(f?.mirrorSells),
+          };
+        }),
+    get_trader_trades: ({ coin, hours = 24, limit = 60 }) => {
+      const since = Date.now() - Math.min(168, Math.max(1, Number(hours) || 24)) * 3600_000;
+      const c = String(coin || '').replace(/^\$/, '').toLowerCase();
+      const names = Object.fromEntries(engine.follows.map((f) => [f.traderWallet, f.handle]));
+      const fname = Object.fromEntries(engine.follows.map((f) => [f.id, f.handle]));
+      return (engine.traderLog || [])
+        .filter((e) => e.t >= since && (!c || String(e.sym || '').toLowerCase() === c || String(e.mint).toLowerCase() === c))
+        .slice(-Math.min(300, Math.max(1, Number(limit) || 60)))
+        .reverse()
+        .map((e) => ({ at: new Date(e.t).toISOString(), trader: names[e.w] || e.w, coin: e.sym, mint: e.mint, side: e.side, priceUsd: e.px, usd: e.usd, soldPctOfBag: e.share, marketCapUsd: e.mc, seenLateSec: e.lag, copies: (e.copies || []).map((x) => ({ follow: fname[x.fid] || x.fid, copied: x.ok, dryRun: x.dry || undefined, reason: x.reason || undefined })) }));
+    },
+    get_settings: () => {
+      const rt = realTrader.status();
+      return {
+        mode: engine.settings.paperTrading ? 'paper' : 'real SOL',
+        traders: engine.follows.map((f) => ({ name: f.handle, wallet: f.traderWallet, status: f.status, pauseReason: f.pauseDetail || null, mode: f.mode, sellsWhenTraderSells: Boolean(f.mirrorSells), size: f.sizing, stopLossPct: f.slPct ?? null, takeProfitPct: f.tpPct ?? null, maxChasePct: f.maxChasePct ?? engine.settings.maxChasePct ?? null, copyTopUps: f.copyTopUps ?? null, realSolPerDay: f.maxRealSolPerDay ?? null, exitRules: f.exitRules })),
+        realTrading: rt.configured ? { wallet: rt.address, balanceSol: rt.balance?.sol ?? null, perBuySol: rt.caps?.maxSolPerTrade, perDaySol: rt.caps?.maxSolPerDay, usedLast24hSol: rt.spent24hSol, keptForFeesSol: rt.caps?.reserveSol } : 'bot wallet not set up',
+      };
+    },
+  },
+  basicAnswer: (q, opts) => basicDaxAnswer(q, daxReport(periodFromQuestion(q)), opts),
+});
+
 // Daily report to Telegram / Discord at the chosen UTC hour (once a day, only on the trading copy)
 setInterval(async () => {
   try {
@@ -786,6 +830,14 @@ export const server = http.createServer(async (req, res) => {
         return res.end(rep.markdown);
       }
       return sendJson(res, 200, { ok: true, period: rep.period, generatedAt: rep.generatedAt, findings: rep.findings, markdown: rep.markdown, summaryText: rep.summaryText, dax: daxPublicSettings() });
+    }
+    if (req.method === 'POST' && pathname === '/api/dax/chat') {
+      const body = await readJsonBody(req);
+      const r = await daxChat.reply(Array.isArray(body.messages) ? body.messages : [], { voice: Boolean(body.voice) });
+      return sendJson(res, r.ok ? 200 : 400, { ...r, ...(r.error ? { error: redact(r.error, process.env.ANTHROPIC_API_KEY) } : {}) });
+    }
+    if (req.method === 'GET' && pathname === '/api/dax/chat/status') {
+      return sendJson(res, 200, { ok: true, ...daxChat.status(), lastError: daxChat.status().lastError ? redact(daxChat.status().lastError, process.env.ANTHROPIC_API_KEY) : null });
     }
     if (req.method === 'POST' && pathname === '/api/dax/send') {
       const body = await readJsonBody(req);

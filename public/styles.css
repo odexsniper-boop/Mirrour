@@ -6805,3 +6805,65 @@ body, button, input, select, textarea, .kpi-label, .card-title, .term-tab {
 .dax-report th{background:var(--card-sub);font-weight:600}
 .dax-report pre{background:var(--card-sub);border:1px solid var(--border);border-radius:8px;padding:10px 12px;font-size:11.5px;overflow-x:auto}
 @media (max-width:720px){.dax-daily{margin-left:0}}
+
+/* ---------------- Dax chat bubble + window ---------------- */
+.nav-dax-img{width:18px;height:18px;object-fit:contain;filter:drop-shadow(0 0 4px rgba(255,255,255,.15))}
+.dax-fab{position:fixed;right:22px;bottom:50px;z-index:950;width:60px;height:60px;border-radius:50%;border:1px solid rgba(255,255,255,.12);background:radial-gradient(circle at 35% 30%,#2a2440,#121118);box-shadow:0 10px 30px rgba(0,0,0,.45),0 0 0 4px rgba(139,92,246,.12);display:grid;place-items:center;cursor:pointer;padding:0;transition:transform .18s ease,box-shadow .18s ease;animation:daxBob 4s ease-in-out infinite}
+.dax-fab:hover{transform:translateY(-2px) scale(1.04);box-shadow:0 14px 34px rgba(0,0,0,.5),0 0 0 5px rgba(139,92,246,.22)}
+.dax-fab img{width:46px;height:46px;object-fit:contain;pointer-events:none}
+.dax-fab-dot{position:absolute;right:5px;bottom:6px;width:11px;height:11px;border-radius:50%;background:#10b981;border:2px solid #121118}
+.dax-fab.is-basic .dax-fab-dot{background:#a1a1aa}
+.dax-fab[aria-expanded="true"]{animation:none}
+@keyframes daxBob{0%,100%{transform:translateY(0)}50%{transform:translateY(-3px)}}
+.dax-chat{position:fixed;right:22px;bottom:122px;z-index:960;width:390px;max-width:calc(100vw - 32px);height:min(600px,calc(100vh - 170px));display:flex;flex-direction:column;background:#111117;border:1px solid rgba(255,255,255,.09);border-radius:18px;box-shadow:0 24px 60px rgba(0,0,0,.55);overflow:hidden}
+.dax-chat[hidden]{display:none}
+.dc-head{display:flex;align-items:center;gap:10px;padding:12px 12px 12px 14px;border-bottom:1px solid rgba(255,255,255,.06);background:linear-gradient(180deg,rgba(139,92,246,.10),transparent)}
+.dc-avatar{width:38px;height:38px;object-fit:contain}
+.dc-title{display:flex;flex-direction:column;flex:1;min-width:0}
+.dc-title strong{font-size:14.5px}
+.dc-title span{font-size:11.5px;color:var(--text-dim)}
+.dc-icon{width:32px;height:32px;border-radius:9px;border:1px solid rgba(255,255,255,.07);background:rgba(255,255,255,.03);color:var(--text-dim);display:grid;place-items:center;cursor:pointer;flex:none}
+.dc-icon:hover{color:#fff;background:rgba(255,255,255,.07)}
+.dc-icon:disabled{opacity:.4;cursor:not-allowed}
+.dc-msgs{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+.dc-msg{max-width:86%;padding:9px 12px;border-radius:14px;font-size:13px;line-height:1.5;white-space:pre-wrap;word-wrap:break-word}
+.dc-msg.dax{align-self:flex-start;background:#1b1b24;border:1px solid rgba(255,255,255,.06);border-top-left-radius:5px}
+.dc-msg.me{align-self:flex-end;background:#6d4aff;color:#fff;border-top-right-radius:5px}
+.dc-msg.err{align-self:flex-start;background:rgba(244,63,94,.1);border:1px solid rgba(244,63,94,.3);color:#fda4af}
+.dc-msg .dc-meta{display:block;margin-top:5px;font-size:10.5px;opacity:.6}
+.dc-msg.dax table{border-collapse:collapse;margin:6px 0;font-size:11.5px;white-space:nowrap}
+.dc-msg.dax th,.dc-msg.dax td{border:1px solid rgba(255,255,255,.1);padding:3px 6px}
+.dc-msg.dax ul{margin:4px 0;padding-left:16px}
+.dc-msg.dax p{margin:3px 0}
+.dc-msg.dax .dax-tbl-wrap{overflow-x:auto}
+.dc-typing{align-self:flex-start;display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-dim)}
+.dc-typing img{width:26px;height:26px;object-fit:contain;animation:daxBob 1.2s ease-in-out infinite}
+.dc-chips{display:flex;gap:6px;flex-wrap:wrap;padding:0 14px 8px}
+.dc-chips button{font:inherit;font-size:11.5px;padding:5px 10px;border-radius:999px;border:1px solid rgba(139,92,246,.35);background:rgba(139,92,246,.08);color:#ddd6fe;cursor:pointer}
+.dc-chips button:hover{background:rgba(139,92,246,.18)}
+.dc-input{display:flex;align-items:flex-end;gap:8px;padding:10px 12px;border-top:1px solid rgba(255,255,255,.06)}
+.dc-input textarea{flex:1;resize:none;min-height:38px;max-height:120px;padding:9px 12px;border-radius:12px;border:1px solid rgba(255,255,255,.09);background:#0c0c11;color:var(--text);font:inherit;font-size:13px;line-height:1.4;outline:none}
+.dc-input textarea:focus{border-color:rgba(139,92,246,.55)}
+.dc-mic,.dc-send{width:38px;height:38px;border-radius:12px}
+.dc-send{border:none;background:#6d4aff;color:#fff;display:grid;place-items:center;cursor:pointer}
+.dc-send:disabled{opacity:.5;cursor:not-allowed}
+.dc-mic.is-rec{background:rgba(244,63,94,.18);border-color:rgba(244,63,94,.5);color:#fb7185;animation:daxPulse 1.2s ease-in-out infinite}
+@keyframes daxPulse{0%,100%{box-shadow:0 0 0 0 rgba(244,63,94,.35)}50%{box-shadow:0 0 0 6px rgba(244,63,94,0)}}
+.dc-call{position:absolute;inset:0;z-index:2;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:24px;background:radial-gradient(circle at 50% 35%,#231c3d,#0d0c12 70%)}
+.dc-call[hidden]{display:none}
+.dc-call-face{width:150px;height:150px;border-radius:50%;display:grid;place-items:center;background:rgba(255,255,255,.03);box-shadow:0 0 0 0 rgba(139,92,246,.4);transition:box-shadow .2s}
+.dc-call-face img{width:120px;height:120px;object-fit:contain}
+.dc-call-face.listening{animation:daxListen 1.6s ease-in-out infinite}
+.dc-call-face.speaking{animation:daxSpeak .7s ease-in-out infinite}
+.dc-call-face.thinking img{animation:daxBob 1s ease-in-out infinite}
+@keyframes daxListen{0%,100%{box-shadow:0 0 0 0 rgba(16,185,129,.35)}50%{box-shadow:0 0 0 18px rgba(16,185,129,0)}}
+@keyframes daxSpeak{0%,100%{box-shadow:0 0 0 4px rgba(139,92,246,.35)}50%{box-shadow:0 0 0 14px rgba(139,92,246,.12)}}
+.dc-call-state{font-size:15px;font-weight:600}
+.dc-call-heard{min-height:40px;max-width:100%;text-align:center;font-size:12.5px;color:var(--text-dim);line-height:1.45}
+.dc-call-btns{display:flex;gap:10px}
+.dc-call-btns button{font:inherit;font-size:13px;font-weight:600;padding:10px 18px;border-radius:999px;border:none;cursor:pointer}
+.dc-call-mute{background:rgba(255,255,255,.08);color:#fff}
+.dc-call-mute.on{background:#f59e0b;color:#111}
+.dc-call-end{background:#f43f5e;color:#fff}
+@media (max-width:560px){.dax-chat{right:16px;left:16px;width:auto;bottom:118px;height:calc(100vh - 150px)}.dax-fab{right:16px}}
+body.logged-out .dax-fab,body.logged-out .dax-chat{display:none!important}
