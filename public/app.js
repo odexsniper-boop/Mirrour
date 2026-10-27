@@ -1808,8 +1808,10 @@ function renderBotWalletCard(fromLoad = false) {
             : `<div><strong class="mono">—</strong> <span>SOL</span></div><div class="sw-usd mono">${addr ? 'Reading balance…' : 'Balance shows once the key is set'}</div>`}
           ${s.configured ? `<div class="bw-limits mono">Max ${caps.maxSolPerTrade} SOL per buy · ${caps.maxSolPerDay > 0 ? `${spent.toFixed(3)} / ${caps.maxSolPerDay} SOL used today` : 'no daily cap'} · ${caps.reserveSol} SOL kept for fees</div>` : ''}
           <div class="bw-note">${note}</div>
+          ${s.configured ? `<div class="bw-rent mono" id="bw-rent">${rentLineHtml()}</div>` : ''}
         </div>
         <div class="sw-actions">
+          ${s.configured ? `<button class="btn" id="bw-rent-btn" onclick="reclaimRentNow()" title="Close the bot wallet's empty token accounts and get their rent back (≈0.002 SOL per coin traded)">Reclaim rent</button>` : ''}
           ${addr ? `<button class="btn" onclick="openDepositModal('deposit')" title="Send SOL to the bot wallet from Phantom or MetaMask">Fund</button>
           <a class="btn" href="https://solscan.io/account/${encodeURIComponent(addr)}" target="_blank" rel="noopener">Explorer</a>
           <button class="btn btn-primary" id="bw-test-btn" onclick="botWalletSelfTest()" title="Checks the key and simulates a tiny swap — nothing is sent">Self-test</button>` : ''}
@@ -6453,3 +6455,55 @@ window.toggleDaxCallMute = function toggleDaxCallMute() {
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && daxc.open && !document.querySelector('.modal-backdrop.open')) toggleDaxChat(false);
 });
+
+
+// ---------------------------------------------------------------------------
+// Rent reclaim: SOL locked in the bot wallet's empty token accounts (≈0.002 SOL per coin)
+// ---------------------------------------------------------------------------
+const rentState = { preview: null, at: 0, loading: false };
+function rentLineHtml() {
+  const p = rentState.preview;
+  if (!p) {
+    if (Date.now() - rentState.at > 60_000) setTimeout(previewRent, 0);
+    return 'Locked rent: checking…';
+  }
+  if (!p.ok) return `Locked rent: ${esc(p.error || 'unknown')}`;
+  return p.found ? `Locked rent: <b>${p.foundSol.toFixed(4)} SOL</b> in ${p.found} empty token account${p.found === 1 ? '' : 's'} — reclaimed automatically after sells` : 'Locked rent: none — every empty token account is closed';
+}
+async function previewRent() {
+  if (rentState.loading) return;
+  rentState.loading = true;
+  rentState.at = Date.now();
+  try {
+    rentState.preview = await (await fetch('/api/real/reclaim-rent', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dryRun: true }) })).json();
+  } catch {
+    rentState.preview = { ok: false, error: 'could not check' };
+  } finally {
+    rentState.loading = false;
+  }
+  const el = document.getElementById('bw-rent');
+  if (el) el.innerHTML = rentLineHtml();
+}
+window.reclaimRentNow = async function reclaimRentNow() {
+  const btn = document.getElementById('bw-rent-btn');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = 'Reclaiming…';
+  }
+  try {
+    const r = await (await fetch('/api/real/reclaim-rent', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) })).json();
+    if (!r.ok) showToast(r.error || 'Could not reclaim rent', 'danger');
+    else if (!r.found) showToast('Nothing to reclaim — no empty token accounts', 'good');
+    else showToast(`Reclaimed ${r.reclaimedSol.toFixed(4)} SOL from ${r.closed} empty token account${r.closed === 1 ? '' : 's'}${r.failed ? ` (${r.failed} could not be closed)` : ''}`, r.closed ? 'good' : 'danger');
+  } catch {
+    showToast('Could not reclaim rent', 'danger');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = 'Reclaim rent';
+    }
+    rentState.preview = null;
+    rentState.at = 0;
+    previewRent();
+  }
+};

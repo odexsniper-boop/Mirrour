@@ -286,6 +286,38 @@ function daxReport(period) {
 function daxFilename(rep) {
   return `dax-report-${rep.period.preset}-${new Date(rep.generatedAt).toISOString().slice(0, 16).replace(/[:T]/g, '-')}.md`;
 }
+// ---------------------------------------------------------------------------
+// Rent reclaim: close the bot wallet's empty token accounts (≈0.002 SOL each) — after every full
+// real sell (30 s later) and every 30 min. Only on the trading copy; open / in-flight coins skipped.
+// ---------------------------------------------------------------------------
+function reclaimSkipMints() {
+  const skip = new Set(engine.positions.filter((p) => p.remainingTokens > 0).map((p) => p.tokenAddress));
+  for (const k of engine.buysInFlight || []) skip.add(String(k).split(':').slice(1).join(':'));
+  return skip;
+}
+async function runRentReclaim({ dryRun = false, why = 'auto' } = {}) {
+  if (!realTrader.ready()) return { ok: false, error: realTrader.keyError || 'bot wallet key not loaded' };
+  if (!dryRun && (realBlockedReason || otherInstance || shuttingDownFlag)) return { ok: false, error: realBlockedReason || (otherInstance ? `another copy of Odex Mirror is running (${otherInstance.host}) — it reclaims rent there` : 'shutting down') };
+  const r = await realTrader.reclaimRent({ skipMints: reclaimSkipMints(), dryRun });
+  if (r.ok && !dryRun && r.reclaimedSol > 0) {
+    // the rent was booked as a cost when each coin was bought: getting it back is real profit
+    const px = Number(CHAINS.solana.nativePriceUsd) || 0;
+    engine.realizedLog.push({ t: Date.now(), pnl: Number((r.reclaimedSol * px).toFixed(4)), sol: Number(r.reclaimedSol.toFixed(6)), paper: false, sym: 'rent reclaimed', closes: false, kind: 'rent' });
+    engine.emit('rent_reclaimed', { closed: r.closed, sol: r.reclaimedSol, why });
+    console.log(`Rent reclaim (${why}): closed ${r.closed} empty token account(s), +${r.reclaimedSol.toFixed(5)} SOL`);
+  }
+  return r;
+}
+let reclaimTimer = null;
+engine.onUpdate((evt) => {
+  if (evt.type !== 'position_sold' || evt.payload?.position?.isPaper !== false || evt.payload.position.remainingTokens > 0) return;
+  clearTimeout(reclaimTimer);
+  reclaimTimer = setTimeout(() => runRentReclaim({ why: 'after sell' }).catch(() => {}), 30_000);
+  reclaimTimer.unref?.();
+});
+setInterval(() => runRentReclaim({ why: 'every 30 min' }).catch(() => {}), 30 * 60_000).unref?.();
+setTimeout(() => runRentReclaim({ why: 'start' }).catch(() => {}), 90_000).unref?.();
+
 // Dax chat (text / voice): Claude with READ-ONLY tools over the bot's records (needs ANTHROPIC_API_KEY)
 const daxAge = (t) => (t ? Math.round((Date.now() - t) / 1000) : null);
 export const daxChat = new DaxChat({
@@ -860,6 +892,12 @@ export const server = http.createServer(async (req, res) => {
       engine.settings.dax = cur;
       engine.emit('settings_updated', {});
       return sendJson(res, 200, { ok: true, dax: daxPublicSettings() });
+    }
+    // Rent reclaim: { dryRun: true } only counts what can be reclaimed
+    if (req.method === 'POST' && pathname === '/api/real/reclaim-rent') {
+      const body = await readJsonBody(req);
+      const r = await runRentReclaim({ dryRun: Boolean(body.dryRun), why: 'by hand' });
+      return sendJson(res, r.ok ? 200 : 400, { ...r, error: r.error ? redact(r.error, alchemy.apiKey) : undefined, errors: (r.errors || []).map((e) => redact(e, alchemy.apiKey)), balance: realTrader.balance || null });
     }
     if (req.method === 'POST' && pathname === '/api/real/test') {
       const r = await realTrader.selfTest();

@@ -12,6 +12,7 @@
  */
 import crypto from 'node:crypto';
 import { base58Decode, base58Encode } from './onchainMeta.mjs';
+import { reclaimRent as reclaimRentRun } from './rentReclaim.mjs';
 
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 export const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
@@ -603,6 +604,29 @@ export class RealTrader {
         this.pendingBuySol -= pendingAdded;
         if (this.pendingBuySol < 1e-9) this.pendingBuySol = 0; // no float leftovers
       }
+    }
+  }
+
+  /**
+   * Close the bot wallet's EMPTY token accounts and get their rent back (≈0.002 SOL per coin
+   * ever traded). skipMints: coins open or being bought. dryRun: only count what is reclaimable.
+   */
+  async reclaimRent({ skipMints = new Set(), dryRun = false } = {}) {
+    if (!this.ready()) return { ok: false, error: this.keyError || 'real trading is not set up (ODEX_TRADER_KEY missing)' };
+    if (this.reclaiming) return { ok: false, error: 'a rent reclaim is already running' };
+    this.reclaiming = true;
+    try {
+      const r = await reclaimRentRun({ rpc: (m, p) => this.rpc(m, p), keypair: this.keypair, owner: this.address, skipMints, dryRun, waitForSignature: (sig, ms) => this.waitForSignature(sig, ms) });
+      if (!dryRun && (r.closed || r.failed)) {
+        this.record({ side: 'reclaim', symbol: `${r.closed} empty token account${r.closed === 1 ? '' : 's'}`, signature: r.signatures[0] || null, ok: r.closed > 0, sol: Number(r.reclaimedSol.toFixed(6)), error: r.failed ? `${r.failed} could not be closed: ${r.errors[0] || ''}` : null });
+        this.refreshBalance().catch(() => {});
+      }
+      this.lastReclaim = { at: this.now(), ...r };
+      return { ok: true, ...r };
+    } catch (err) {
+      return { ok: false, error: err.message };
+    } finally {
+      this.reclaiming = false;
     }
   }
 
