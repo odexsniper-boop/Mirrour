@@ -29,12 +29,13 @@ export function decodeTokenAccount(b64) {
 }
 
 export class TokenAccountStream {
-  constructor({ url = null, WebSocketImpl = globalThis.WebSocket, onChange = () => {}, onStatus = () => {}, redactUrl = (s) => s, keepaliveMs = 30_000, maxBackoffMs = 30_000 } = {}) {
+  constructor({ url = null, WebSocketImpl = globalThis.WebSocket, onChange = () => {}, onStatus = () => {}, redactUrl = (s) => s, commitment = process.env.ODEX_STREAM_COMMITMENT || 'processed', keepaliveMs = 30_000, maxBackoffMs = 30_000 } = {}) {
     this.url = url;
     this.WS = WebSocketImpl;
     this.onChange = onChange;
     this.onStatus = onStatus;
     this.redactUrl = redactUrl;
+    this.commitment = commitment;
     this.keepaliveMs = keepaliveMs;
     this.maxBackoffMs = maxBackoffMs;
     this.wallets = new Set();
@@ -129,7 +130,7 @@ export class TokenAccountStream {
       for (const program of [TOKEN_PROGRAM, TOKEN_2022_PROGRAM]) {
         const filters = [{ memcmp: { offset: 32, bytes: wallet } }];
         if (program === TOKEN_PROGRAM) filters.push({ dataSize: 165 });
-        this.send({ method: 'programSubscribe', params: [program, { encoding: 'base64', commitment: 'confirmed', filters }] }, { wallet, program });
+        this.send({ method: 'programSubscribe', params: [program, { encoding: 'base64', commitment: this.commitment, filters }] }, { wallet, program });
       }
     }
   }

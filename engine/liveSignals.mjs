@@ -58,6 +58,7 @@ export class LiveSignalService {
               streamUrl: `wss://mainnet.helius-rpc.com/?api-key=${heliusKey}`,
               tokenStreamUrl: `wss://mainnet.helius-rpc.com/?api-key=${heliusKey}`,
               balanceWsUrl: env.SOLANA_BALANCE_WS_URL || `wss://mainnet.helius-rpc.com/?api-key=${heliusKey}`,
+              fastRpcUrls: [`https://mainnet.helius-rpc.com/?api-key=${heliusKey}`],
             }
           : {}),
         redactUrl: (x) => redact(redact(x, alchemy?.apiKey), heliusKey),
@@ -194,6 +195,7 @@ export class LiveSignalService {
       live: true,
       token: {
         address: sig.tokenMint,
+        decimals: Number.isInteger(sig.tokenDecimals) ? sig.tokenDecimals : undefined,
         symbol: sig.symbol,
         name: sig.name || sig.symbol,
         isLaunchpad,

@@ -816,6 +816,17 @@ export class CopyTradingEngine {
       }
     }
 
+    // Pre-cap slippage before the first quote when the known market/curve price has already moved
+    // above the trader's fill price, avoiding a second round-trip quote to Jupiter.
+    const maxChasePre = this.maxChaseFor(follow);
+    if (real && Number(token.traderFillPriceUsd) > 0 && maxChasePre < 1000 && Number(token.currentPriceUsd) > Number(token.traderFillPriceUsd) * 1.005) {
+      const ceilingPre = Number(token.traderFillPriceUsd) * (1 + maxChasePre / 100);
+      const roomPre = (1 - Number(token.currentPriceUsd) / ceilingPre) * 100;
+      if (roomPre >= 0.5 && roomPre < buySlippagePct) {
+        buySlippagePct = Math.max(0.5, Math.floor(roomPre * 10) / 10);
+      }
+    }
+
     let quote;
     try {
       quote = await this.adapter.getSwapQuote({

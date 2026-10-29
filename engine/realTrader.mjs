@@ -110,13 +110,14 @@ export class RealTrader {
    * @param state     saved state (spend log, trade log) from the database
    * @param onChange  called after every trade so the state can be saved
    */
-  constructor({ env = process.env, rpc, solPrice, fetchImpl = (...a) => fetch(...a), state = null, onChange = () => {}, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now() } = {}) {
+  constructor({ env = process.env, rpc, solPrice, fetchImpl = (...a) => fetch(...a), state = null, onChange = () => {}, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now(), fastRpcUrls = [] } = {}) {
     this.rpc = rpc;
     this.solPrice = solPrice;
     this.fetch = fetchImpl;
     this.onChange = onChange;
     this.sleep = sleep;
     this.now = now;
+    this.fastRpcUrls = Array.isArray(fastRpcUrls) ? [...new Set(fastRpcUrls.filter(Boolean))] : [];
     this.jupBase = (env.JUPITER_API_URL || 'https://api.jup.ag/swap/v2').replace(/\/+$/, '');
     this.jupKey = env.JUPITER_API_KEY || '';
     const num = (v, d) => (v === undefined || v === '' || !Number.isFinite(Number(v)) ? d : Number(v));
@@ -344,6 +345,7 @@ export class RealTrader {
     if (!this.ready()) throw new Error(this.keyError || 'real trading is not set up (ODEX_TRADER_KEY missing)');
     const px = Number(this.solPrice()) || 0;
     if (!(px > 0)) throw new Error('SOL price not known yet');
+    if (Number.isInteger(token?.decimals)) this.decimals.set(token.address, token.decimals);
     const quoteMint = this.quoteAssetMint(assetMode);
     const marketPx = Number(token.currentPriceUsd) || 0;
     const t0 = this.now();
@@ -361,8 +363,9 @@ export class RealTrader {
     } else {
       const until = this.sellBlockedUntil.get(token.address) || 0;
       if (this.now() < until) throw Object.assign(new Error(`waiting ${Math.ceil((until - this.now()) / 1000)} s before retrying this sell`), { backoff: true });
-      tokDec = await this.getDecimals(token.address);
-      const raw = await this.sellAmountRaw(token.address, tokenAmount, tokDec);
+      const [dec, held] = await Promise.all([this.getDecimals(token.address), this.getTokenBalanceRaw(token.address)]);
+      tokDec = dec;
+      const raw = await this.sellAmountRaw(token.address, tokenAmount, tokDec, held);
       order = await this.order({ inputMint: token.address, outputMint: quoteMint, amountRaw: raw, slippagePct });
       const outUsd = quoteMint === WSOL_MINT ? (Number(order.outAmount) / LAMPORTS) * px : Number(order.outAmount) / 1e6;
       const tokens = Number(raw) / 10 ** tokDec;
@@ -388,14 +391,40 @@ export class RealTrader {
   }
 
   /** How many raw tokens to sell: never more than the wallet holds. */
-  async sellAmountRaw(mint, tokenAmount, decimals) {
-    const held = await this.getTokenBalanceRaw(mint);
+  async sellAmountRaw(mint, tokenAmount, decimals, preHeld = null) {
+    const held = preHeld !== null ? preHeld : await this.getTokenBalanceRaw(mint);
     if (held <= 0n) throw Object.assign(new Error('the bot wallet holds none of this token'), { noTokens: true });
     if (tokenAmount === 'all') return held;
     const want = BigInt(Math.floor(Number(tokenAmount) * 10 ** decimals));
     // never turn a tiny partial sell into "sell everything" (other positions may share this wallet balance)
     if (want <= 0n) throw new Error('sell amount is too small');
     return want > held ? held : want;
+  }
+
+  /**
+   * Fire-and-forget direct broadcast of the signed transaction (`skipPreflight: true`) across all
+   * configured fast RPCs (Helius, Alchemy, Jito Block Engine) in parallel with Jupiter `/execute`
+   * so the transaction reaches the Solana leader in milliseconds.
+   */
+  blastSignedTransaction(signedBase64) {
+    if (!this.fastRpcUrls?.length) return;
+    const payload = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'sendTransaction',
+      params: [signedBase64, { encoding: 'base64', skipPreflight: true, maxRetries: 0 }],
+    });
+    for (const url of this.fastRpcUrls) {
+      try {
+        this.fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: payload,
+        }).catch(() => {});
+      } catch {
+        // best-effort parallel broadcast
+      }
+    }
   }
 
   fail(error, extra = {}) {
@@ -417,6 +446,7 @@ export class RealTrader {
     if (!this.ready()) return this.fail(this.keyError || 'real trading is not set up (ODEX_TRADER_KEY missing)');
     const px = Number(this.solPrice()) || 0;
     if (!(px > 0)) return this.fail('SOL price not known yet');
+    if (Number.isInteger(token?.decimals)) this.decimals.set(token.address, token.decimals);
     const mint = token.address;
     const quoteMint = this.quoteAssetMint(assetMode);
 
@@ -499,6 +529,8 @@ export class RealTrader {
     let exec = null;
     let execErr = null;
     const sendStart = this.now();
+    // Blast the signed transaction directly (skipPreflight: true) to fast RPCs / Jito in parallel
+    this.blastSignedTransaction(signed.signedBase64);
     try {
       exec = await this.jup('/execute', { method: 'POST', body: { signedTransaction: signed.signedBase64, requestId: order.requestId }, timeoutMs: 45_000 });
     } catch (err) {
@@ -644,7 +676,7 @@ export class RealTrader {
       } catch {
         // keep trying
       }
-      await this.sleep(1500);
+      await this.sleep(250);
     }
     return 'unknown';
   }
@@ -668,13 +700,18 @@ export class RealTrader {
     let networkLamports = 5000;
     let decimals = tokDec;
     let tx = null;
-    for (let i = 0; i < 6 && !tx; i++) {
+    // When Jupiter /execute already returned exact input & output amounts, never block the trade for
+    // 6 seconds waiting on getTransaction indexing: try once immediately (+ 1 micro-retry).
+    const haveExecAmounts = inputRaw !== null && outputRaw !== null;
+    const maxTries = haveExecAmounts ? 2 : 6;
+    const waitMs = haveExecAmounts ? 60 : 200;
+    for (let i = 0; i < maxTries && !tx; i++) {
       try {
         tx = await this.rpc('getTransaction', [signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]);
       } catch {
         tx = null;
       }
-      if (!tx) await this.sleep(1000);
+      if (!tx && i + 1 < maxTries) await this.sleep(waitMs);
     }
     if (tx?.meta) {
       const keys = (tx.transaction?.message?.accountKeys || []).map((k) => (typeof k === 'string' ? k : k.pubkey));

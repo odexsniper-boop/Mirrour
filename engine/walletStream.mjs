@@ -56,7 +56,7 @@ export class WalletStream {
     onAccount = () => {},
     onAccountUnsupported = () => {},
     onChange = () => {},
-    commitment = 'confirmed',
+    commitment = process.env.ODEX_STREAM_COMMITMENT || 'processed',
     keepaliveMs = 30_000,
     maxBackoffMs = 30_000,
     redactUrl = (s) => s,

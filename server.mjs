@@ -101,9 +101,12 @@ if (persistence) {
 // ---------- Real trading (Paper Trading OFF + ODEX_TRADER_KEY in .env) ----------
 // The SOL price must be live before a real order is sized (never the built-in placeholder)
 let solPriceLive = false;
+const heliusFastRpc = process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${String(process.env.HELIUS_API_KEY).trim()}` : null;
+const jitoBlockEngine = process.env.ODEX_JITO_RPC_URL || 'https://mainnet.block-engine.jito.wtf/api/v1/transactions';
 export const realTrader = new RealTrader({
   env: process.env,
-  rpc: (method, params) => liveSignals.watcher.rpc(method, params),
+  rpc: (method, params) => liveSignals.watcher.rpc(method, params, { fast: true }),
+  fastRpcUrls: [heliusFastRpc, liveSignals.watcher.rpcUrl, jitoBlockEngine].filter(Boolean),
   solPrice: () => (solPriceLive ? CHAINS.solana.nativePriceUsd : 0),
   state: db ? db.get('realTrader') : null,
   onChange: () => {
@@ -693,7 +696,7 @@ export const server = http.createServer(async (req, res) => {
         }
       };
       const SOL = 'So11111111111111111111111111111111111111112';
-      const USDC = 'EPjFWdd5AufqSSqeM2qJxdtd7cpb1E2GQQDQ6y8kvzVX';
+      const USDC = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
       const probes = {
         solanaRpc: () => liveSignals.watcher.rpc('getSlot', [{ commitment: 'processed' }]),
         jupiterQuote: () => getJson(`${realTrader.jupBase}/order?inputMint=${SOL}&outputMint=${USDC}&amount=10000000`, { headers: realTrader.jupKey ? { 'x-api-key': realTrader.jupKey } : {} }),

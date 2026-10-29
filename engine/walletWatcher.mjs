@@ -118,9 +118,11 @@ export function parseSwapFromTransaction(tx, wallet) {
 
   // --- Token changes for accounts owned by the wallet, summed per mint
   const deltas = new Map();
+  const decimalsByMint = new Map();
   const preByIndex = new Map();
   const preTotals = new Map(); // mint → wallet's balance before this tx (for partial sells)
   for (const tb of meta.preTokenBalances || []) {
+    if (Number.isInteger(tb?.uiTokenAmount?.decimals)) decimalsByMint.set(tb.mint, tb.uiTokenAmount.decimals);
     if (tb.owner === wallet) {
       preByIndex.set(tb.accountIndex, tb);
       preTotals.set(tb.mint, (preTotals.get(tb.mint) || 0) + uiAmount(tb));
@@ -129,6 +131,7 @@ export function parseSwapFromTransaction(tx, wallet) {
   let newTokenAccounts = 0;
   const seen = new Set();
   for (const tb of meta.postTokenBalances || []) {
+    if (Number.isInteger(tb?.uiTokenAmount?.decimals)) decimalsByMint.set(tb.mint, tb.uiTokenAmount.decimals);
     if (tb.owner !== wallet) continue;
     seen.add(tb.accountIndex);
     const pre = preByIndex.get(tb.accountIndex);
@@ -205,6 +208,7 @@ export function parseSwapFromTransaction(tx, wallet) {
     side,
     sellSharePct: sellSharePct === null ? null : Number(sellSharePct.toFixed(2)),
     tokenMint: tok.mint,
+    tokenDecimals: decimalsByMint.get(tok.mint) ?? (/pump$/i.test(tok.mint) ? 6 : null),
     tokenAmount: Math.abs(tok.delta),
     quoteSymbol: quote.symbol,
     quoteMint: quote.mint,
@@ -424,9 +428,11 @@ export class SolanaWalletWatcher {
     balanceWsUrl = process.env.SOLANA_BALANCE_WS_URL || 'wss://api.mainnet-beta.solana.com',
     streamUrl = null, // live push connection; default: the RPC URL as wss
     tokenStreamUrl = null, // token-account push (Helius): spam-proof, fastest buy/sell detection
+    fastRpcUrls = [], // extra low-latency HTTP RPCs raced in parallel on live stream events
     redactUrl = (x) => x,
   } = {}) {
     this.rpcUrl = rpcUrl;
+    this.fastRpcUrls = Array.isArray(fastRpcUrls) ? fastRpcUrls.filter(Boolean) : [];
     this.fixedStreamUrl = streamUrl || null;
     this.fetch = fetchImpl;
     this.tokenInfo = tokenInfo || new TokenInfoService({ fetchImpl });
@@ -443,7 +449,7 @@ export class SolanaWalletWatcher {
     // Token details (name, logo, market data) may wait this long before a trade is passed on
     // for copying; whatever arrives later is filled in afterwards (onTokenInfoLate)
     this.tokenInfoBudgetMs = Number(process.env.ODEX_TOKEN_INFO_BUDGET_MS ?? 1200);
-    this.pumpInfoBudgetMs = Number(process.env.ODEX_PUMP_INFO_BUDGET_MS ?? 150);
+    this.pumpInfoBudgetMs = Number(process.env.ODEX_PUMP_INFO_BUDGET_MS ?? 25);
     this.onTokenInfoLate = null;
     this.rpcTimes = [];
     this.emittedSigs = new Map(); // signature → token mint, for trades that became signals
@@ -452,7 +458,7 @@ export class SolanaWalletWatcher {
     this.streamEnabled = Boolean(stream);
     this.streamQueue = [];
     this.streamActive = 0;
-    this.streamMaxConcurrent = 4;
+    this.streamMaxConcurrent = 16;
     this.streamStats = { swapsSeen: 0, notSwap: 0, failedTx: 0, signals: 0, lagMs: [] };
     this.stream = new WalletStream({
       url: streamUrl || toWsUrl(rpcUrl),
@@ -581,10 +587,10 @@ export class SolanaWalletWatcher {
     if (!w) return;
     this.tokenStats.events += 1;
     const since = Date.now() - 120_000; // only fresh trades (never replay old history)
-    for (let attempt = 0; attempt < 4; attempt++) {
+    for (let attempt = 0; attempt < 14; attempt++) {
       let list = [];
       try {
-        list = (await this.rpc('getSignaturesForAddress', [ev.tokenAccount, { limit: 5, commitment: 'confirmed' }])) || [];
+        list = (await this.rpcRace('getSignaturesForAddress', [ev.tokenAccount, { limit: 5, commitment: 'confirmed' }], (r) => Array.isArray(r) && r.length > 0)) || [];
       } catch {
         list = [];
       }
@@ -607,8 +613,10 @@ export class SolanaWalletWatcher {
         }
         return;
       }
-      // the account's history can trail the push by a moment
-      await new Promise((r) => setTimeout(r, 250 + attempt * 250));
+      // If the newest signature on this token account is already in seenSigs, logsSubscribe already caught it
+      if (list.length > 0 && !list[0].err && this.seenSigs.has(list[0].signature)) return;
+      // the account's history can trail the push by a few ms: micro-retry instead of 250ms+ sleeps
+      await new Promise((r) => setTimeout(r, 35 + attempt * 20));
     }
   }
 
@@ -769,11 +777,11 @@ export class SolanaWalletWatcher {
   }
 
   /** RPC call; a 429 (rate limited) is retried a few times with growing pauses. */
-  async rpc(method, params) {
+  async rpc(method, params, { fast = false, rpcUrl = this.rpcUrl } = {}) {
     for (let attempt = 0; ; attempt++) {
-      await this.throttle();
+      if (!fast) await this.throttle();
       try {
-        return await this.rpcOnce(method, params);
+        return await this.rpcOnce(method, params, rpcUrl);
       } catch (err) {
         if (!err.rateLimited || attempt >= 3) throw err;
         await new Promise((r) => setTimeout(r, 500 * 2 ** attempt + Math.random() * 200));
@@ -781,7 +789,28 @@ export class SolanaWalletWatcher {
     }
   }
 
-  async rpcOnce(method, params) {
+  /**
+   * Race primary RPC + any extra fastRpcUrls (e.g. Helius + Alchemy in parallel) so cross-provider
+   * indexing lag never delays a live stream trade.
+   */
+  async rpcRace(method, params, isGood = (r) => r != null) {
+    const extras = (this.fastRpcUrls || []).filter((u) => u && u !== this.rpcUrl);
+    if (!extras.length) return this.rpc(method, params, { fast: true });
+    const urls = [this.rpcUrl, ...extras];
+    try {
+      return await Promise.any(
+        urls.map(async (u, idx) => {
+          const r = idx === 0 ? await this.rpc(method, params, { fast: true }) : await this.rpcOnce(method, params, u);
+          if (!isGood(r)) throw new Error('not indexed yet');
+          return r;
+        })
+      );
+    } catch {
+      return null;
+    }
+  }
+
+  async rpcOnce(method, params, rpcUrl = this.rpcUrl) {
     this.status.rpcCalls += 1;
     const ctrl = new AbortController();
     // Token-account listings of spam-flooded wallets can be several MB: give them more time
@@ -789,7 +818,7 @@ export class SolanaWalletWatcher {
     let res;
     const startedAt = Date.now();
     try {
-      res = await this.fetch(this.rpcUrl, {
+      res = await this.fetch(rpcUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ jsonrpc: '2.0', id: this.status.rpcCalls, method, params }),
@@ -820,12 +849,13 @@ export class SolanaWalletWatcher {
    * version 0 only makes the RPC refuse them (error -32015), which silently hid trades.
    * Request the newest version we parse, and fall back if an older RPC rejects that.
    */
-  async getTransaction(sig) {
+  async getTransaction(sig, { fast = false } = {}) {
     const versions = this.txVersion != null ? [this.txVersion] : [1, 0];
     let lastErr = null;
     for (const v of versions) {
       try {
-        const tx = await this.rpc('getTransaction', [sig, { encoding: 'jsonParsed', maxSupportedTransactionVersion: v, commitment: 'confirmed' }]);
+        const params = [sig, { encoding: 'jsonParsed', maxSupportedTransactionVersion: v, commitment: 'confirmed' }];
+        const tx = fast ? await this.rpcRace('getTransaction', params, (r) => r != null) : await this.rpc('getTransaction', params);
         if (this.txVersion == null) this.txVersion = v;
         return tx;
       } catch (err) {
@@ -843,11 +873,13 @@ export class SolanaWalletWatcher {
     this.seenSigs.add(sig);
     if (this.seenSigs.size > 5000) this.seenSigs = new Set([...this.seenSigs].slice(-2500));
 
-    let tx = knownTx || (await this.getTransaction(sig));
-    // A pushed trade can arrive a moment before the RPC can serve it: retry briefly (~2 s)
-    for (let i = 0; waitForTx && !tx && i < 6; i++) {
-      await new Promise((r) => setTimeout(r, 200 + i * 100));
-      tx = await this.getTransaction(sig);
+    const fast = Boolean(waitForTx || via === 'stream' || via === 'token-stream');
+    let tx = knownTx || (await this.getTransaction(sig, { fast }));
+    // A pushed trade (at 'processed' commitment) can arrive 30–150 ms before getTransaction serves it:
+    // poll with fast micro-intervals (35ms, 55ms, 75ms…) instead of 200ms–700ms sleeps.
+    for (let i = 0; waitForTx && !tx && i < 15; i++) {
+      await new Promise((r) => setTimeout(r, 35 + i * 20));
+      tx = await this.getTransaction(sig, { fast });
     }
     this.status.txParsed += 1;
     const swap = parseSwapFromTransaction(tx, w.address);
@@ -903,6 +935,7 @@ export class SolanaWalletWatcher {
       label: w.label,
       side: swap.side,
       tokenMint: swap.tokenMint,
+      tokenDecimals: swap.tokenDecimals ?? null,
       symbol: info?.symbol || `${swap.tokenMint.slice(0, 4)}…${swap.tokenMint.slice(-4)}`,
       name: info?.name || null,
       tokenAmount: swap.tokenAmount,
@@ -1204,7 +1237,7 @@ export class SolanaWalletWatcher {
     for (let attempt = 0; attempt < 4 && this.running; attempt++) {
       let recent = null;
       try {
-        recent = (await this.rpc('getSignaturesForAddress', [w.address, { limit: 300, commitment: 'confirmed' }])) || [];
+        recent = (await this.rpc('getSignaturesForAddress', [w.address, { limit: 300, commitment: 'confirmed' }], { fast: true })) || [];
       } catch {
         break; // fall back to the block read below
       }
@@ -1212,15 +1245,17 @@ export class SolanaWalletWatcher {
       const newest = recent[0].slot;
       const oldest = recent[recent.length - 1]?.slot ?? Infinity;
       if (newest < slot) {
-        await sleep(400); // the slot isn't indexed yet
+        await sleep(60); // the slot isn't indexed yet
         continue;
       }
       if (oldest > slot && recent.length >= 300) break; // flooded past it: read the block instead
       this.streamStats.slotLookups = (this.streamStats.slotLookups || 0) + 1;
       const inSlot = recent.filter((s) => s.slot === slot && !s.err && !this.seenSigs.has(s.signature)).map((s) => s.signature);
+      const foundList = await Promise.all(
+        inSlot.map((sig) => this.processSignature(w, sig, { backfill: false, via: 'stream', receivedAt, waitForTx: true }).catch(() => null))
+      );
       const out = [];
-      for (const sig of inSlot) {
-        const found = await this.processSignature(w, sig, { backfill: false, via: 'stream', receivedAt, waitForTx: true });
+      for (const found of foundList) {
         if (found) {
           found.source = 'balances-verified';
           out.push(found);
@@ -1238,14 +1273,14 @@ export class SolanaWalletWatcher {
     let block = null;
     for (let attempt = 0; attempt < 10 && this.running; attempt++) {
       try {
-        block = await this.rpc('getBlock', [slot, { encoding: 'json', transactionDetails: 'accounts', maxSupportedTransactionVersion: 0, rewards: false, commitment: 'confirmed' }]);
+        block = await this.rpc('getBlock', [slot, { encoding: 'json', transactionDetails: 'accounts', maxSupportedTransactionVersion: 0, rewards: false, commitment: 'confirmed' }], { fast: true });
         if (block) break;
         if (attempt >= 1) return null; // an empty answer (not 'not available yet'): this RPC can't serve it
       } catch (err) {
         if (/skipped|missing in long-term storage|-32007|-32009/i.test(err.message)) return null;
         if (err.rateLimited && attempt >= 3) return null;
       }
-      await sleep(attempt < 4 ? 400 : 800); // a just-confirmed block can take a moment to be served
+      await sleep(attempt < 4 ? 60 : 150); // a just-confirmed block can take a moment to be served
     }
     if (!block?.transactions) return null;
     this.streamStats.blocksRead = (this.streamStats.blocksRead || 0) + 1;
@@ -1405,6 +1440,7 @@ export class SolanaWalletWatcher {
       label: w.label,
       side: swap.side,
       tokenMint: swap.tokenMint,
+      tokenDecimals: swap.tokenDecimals ?? null,
       symbol: info?.symbol || `${swap.tokenMint.slice(0, 4)}…${swap.tokenMint.slice(-4)}`,
       name: info?.name || null,
       tokenAmount: swap.tokenAmount,
