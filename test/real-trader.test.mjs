@@ -765,3 +765,41 @@ test('fast fill path: a first buy still counts the token-account rent when the t
   const rec = e.history.find((h) => h.side === 'buy' && h.status === 'filled');
   assert.ok(rec.networkFeeUsd >= (2_039_280 / 1e9) * SOL_PX - 0.001, `network fee ${rec.networkFeeUsd} includes the ~0.002 SOL rent`);
 });
+
+test('EARNY race end-to-end: "trader sold" sells position A while B’s buy of the same coin is landing → B keeps its coins', async () => {
+  const { w, trader } = world();
+  const { e, f } = engineFor(trader, { mode: 'buy-hold' });
+  // top-ups on (the live setting): each top-up is its own position
+  await e.processTraderSignal(buySig(f));
+  const A = e.positions.find((p) => p.remainingTokens > 0);
+  assert.ok(A, 'position A open');
+  const tokA = w.tok;
+  // B's buy: hold its Jupiter /execute until A's sell has gone out
+  let releaseB;
+  const gate = new Promise((r) => (releaseB = r));
+  const realFetch = trader.fetch;
+  let held = false;
+  trader.fetch = async (url, opts) => {
+    if (!held && String(url).includes('/execute')) {
+      held = true;
+      const res = await realFetch(url, opts); // B lands on-chain now (wallet holds A + B)…
+      await gate; // …but the bot hasn't booked B yet
+      return res;
+    }
+    return realFetch(url, opts);
+  };
+  const bDone = e.processTraderSignal(buySig(f));
+  for (let i = 0; i < 50 && !held; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(held, 'B is landing');
+  assert.ok(w.tok > tokA, 'wallet now holds A + B');
+  const tokB = w.tok - tokA;
+  const sell = await e.executePositionSell(A.id, { sellPct: 100, cause: 'trader sold' });
+  assert.equal(sell.ok, true, sell.error);
+  assert.equal(w.tok, tokB, 'only A’s coins were sold');
+  releaseB();
+  await bDone;
+  const B = e.positions.find((p) => p.id !== A.id && p.remainingTokens > 0);
+  assert.ok(B, 'position B booked and still open');
+  assert.equal(A.remainingTokens, 0);
+  assert.ok(Math.abs(B.remainingTokens * 1e6 - Number(tokB)) < 2, `B holds ${B.remainingTokens}, wallet has ${Number(tokB) / 1e6}`);
+});
