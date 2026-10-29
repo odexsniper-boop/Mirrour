@@ -146,6 +146,13 @@ let shuttingDownFlag = false;
 const INSTANCE_ID = `${ON_RAILWAY ? 'railway' : 'pc'}-${Math.random().toString(36).slice(2, 10)}`;
 let otherInstance = null; // { id, host, at } of the other running copy, if any
 let ownsLock = false; // this copy holds the one-bot lock
+let lockUnreachableSince = 0; // Supabase could not be reached for the lock check since then
+/** This copy owns the saved data (or there is no cloud lock to respect). */
+function holdsData() {
+  if (!persistence || !supabase.enabled || ownsLock) return true;
+  // Supabase unreachable for a while and no other copy known: work locally rather than freeze
+  return !otherInstance && lockUnreachableSince > 0 && Date.now() - lockUnreachableSince > 30_000;
+}
 // Until the first lock check, don't upload anything: another copy may still own the account
 if (persistence && supabase.enabled) persistence.cloudPaused = true;
 async function instanceHeartbeat() {
@@ -153,6 +160,7 @@ async function instanceHeartbeat() {
   if (shuttingDownFlag) return;
   try {
     const rows = await supabase.request('GET', '?key=eq.instance_lock&select=value');
+    lockUnreachableSince = 0;
     const cur = Array.isArray(rows) ? rows[0]?.value : null;
     const now = Date.now();
     if (cur && cur.id !== INSTANCE_ID && now - Number(cur.at || 0) < 75_000) {
@@ -197,11 +205,25 @@ async function instanceHeartbeat() {
       }
     }
   } catch {
+    if (!lockUnreachableSince) lockUnreachableSince = Date.now();
     // Supabase unreachable: keep the last known state
   }
 }
 instanceHeartbeat();
 setInterval(instanceHeartbeat, 25_000).unref?.();
+// while waiting for the lock (a new version starting, the old one stopping), look every 4 s so
+// the handover takes seconds, not up to a minute
+setInterval(() => {
+  if (!ownsLock && !shuttingDownFlag) instanceHeartbeat();
+}, 4_000).unref?.();
+
+/** Why changes can't be saved on this copy right now (null = they can). */
+function changesBlockedReason() {
+  if (shuttingDownFlag) return 'Odex is restarting for an update — try again in a few seconds (nothing was changed).';
+  if (holdsData()) return null;
+  if (otherInstance && otherInstance.host !== 'stopped') return `Another copy of Odex Mirror is running (${otherInstance.host}) and owns the saved data — make changes there, or stop it (nothing was changed).`;
+  return 'Odex is switching to the new version — try again in a few seconds (nothing was changed).';
+}
 // Ghost positions (sold on-chain but not recorded, e.g. during a redeploy): fix them from the
 // bot's own swap log every 30 s
 setInterval(() => {
@@ -212,7 +234,9 @@ setInterval(() => {
     // best effort
   }
 }, 30_000).unref?.();
-engine.adapter.realEnabled = () => realTrader.ready() && !realBlockedReason && !otherInstance;
+// real swaps only on the copy that owns the saved data (a swap made during a handover would be
+// overwritten when the data owner's last save is loaded)
+engine.adapter.realEnabled = () => realTrader.ready() && !realBlockedReason && !otherInstance && holdsData();
 engine.adapter.realBuyRoomUsd = () => realTrader.buyRoomUsd();
 engine.realTradingActive = () => !engine.settings.paperTrading && engine.adapter.realEnabled();
 
@@ -649,6 +673,14 @@ export const server = http.createServer(async (req, res) => {
     if (pathname.startsWith('/api/')) {
       const blocked = requestBlockedReason(req);
       if (blocked) return sendJson(res, 403, { ok: false, error: blocked });
+    }
+
+    // Handover guard: while this copy does not own the saved data (a new version waiting for the
+    // old one to stop, another copy running, or shutting down), a change made here would be
+    // overwritten when the data owner's save is loaded. Refuse changes instead of losing them.
+    if (pathname.startsWith('/api/') && req.method !== 'GET' && pathname !== '/api/dax/chat') {
+      const why = changesBlockedReason();
+      if (why) return sendJson(res, 503, { ok: false, error: why, retry: true });
     }
 
     // 1. Server-Sent Events stream for real-time terminal updates
