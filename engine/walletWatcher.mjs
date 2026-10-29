@@ -19,6 +19,9 @@ export function isPumpFunCoin(swap) {
   return Boolean(swap && /pump$/.test(String(swap.tokenMint || '')) && (swap.venue === 'pumpfun' || swap.venue === 'pumpswap'));
 }
 import { bondingCurvePda } from './pumpCurve.mjs';
+import { pumpTradeFromLogs, swapFromPumpTrade } from './pumpLogs.mjs';
+import { findProgramAddress, base58Decode as b58d } from './onchainMeta.mjs';
+const ASSOCIATED_TOKEN_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 export const QUOTE_MINTS = {
   [WSOL_MINT]: 'SOL',
@@ -460,6 +463,11 @@ export class SolanaWalletWatcher {
     this.streamActive = 0;
     this.streamMaxConcurrent = 16;
     this.streamStats = { swapsSeen: 0, notSwap: 0, failedTx: 0, signals: 0, lagMs: [] };
+    // Fast trade detection (Settings): read pump.fun trades from the pushed logs, confirm later
+    this.fastDetect = () => false;
+    this.onPhantomTrade = null; // ({ signature, wallet, side, mint, reason }) → close the copy
+    this.fastStats = { hits: 0, misses: 0, forged: 0, confirmed: 0, phantoms: 0, missReasons: {}, lagMs: [], lastPhantom: null };
+    this.confirmDelaysMs = [1500, 2500, 4000, 6000, 10_000, 15_000, 20_000];
     this.stream = new WalletStream({
       url: streamUrl || toWsUrl(rpcUrl),
       WebSocketImpl,
@@ -640,9 +648,123 @@ export class SolanaWalletWatcher {
       return;
     }
     this.streamStats.swapsSeen += 1;
+    if (this.fastDetect() && Array.isArray(ev.logs) && ev.logs.some((l) => String(l).includes('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'))) {
+      const r = pumpTradeFromLogs(ev.logs, address, { err: ev.err });
+      if (r.trade) {
+        this.fastTrade(w, ev, r.trade);
+        return;
+      }
+      if (r.forged) this.fastStats.forged += 1;
+      this.fastStats.misses += 1;
+      this.fastStats.missReasons[r.skip] = (this.fastStats.missReasons[r.skip] || 0) + 1;
+    }
     this.streamQueue.push({ w, ev });
     if (this.streamQueue.length > 200) this.streamQueue.splice(0, this.streamQueue.length - 200);
     this.drainStream();
+  }
+
+  /**
+   * Fast path: a pump.fun trade read from the pushed logs (see pumpLogs.mjs for the safety
+   * checks). Sells need the trader's balance after the trade (one `processed` account read) to
+   * know what share was sold. The trade is then confirmed in the background; one that never
+   * confirms is reported to onPhantomTrade so the copy can be closed.
+   */
+  async fastTrade(w, ev, trade) {
+    const sig = ev.signature;
+    if (this.seenSigs.has(sig)) return null;
+    let heldAfterRaw = null;
+    if (!trade.isBuy) {
+      try {
+        const atas = [TOKEN_PROGRAM, TOKEN_2022_PROGRAM].map((p) => findProgramAddress([b58d(w.address), b58d(p), b58d(trade.mint)].map((b) => Buffer.from(b)), ASSOCIATED_TOKEN_PROGRAM));
+        const res = await this.rpc('getMultipleAccounts', [atas, { encoding: 'base64', commitment: 'processed' }], { fast: true });
+        const vals = res?.value;
+        if (!Array.isArray(vals)) throw new Error('no balance');
+        heldAfterRaw = vals.reduce((sum, a) => {
+          const b = a?.data?.[0] ? Buffer.from(a.data[0], 'base64') : null;
+          return sum + (b && b.length >= 72 ? b.readBigUInt64LE(64) : 0n);
+        }, 0n);
+      } catch {
+        heldAfterRaw = null;
+      }
+      if (heldAfterRaw === null) {
+        // balance unknown: the normal path works out the sell share from the confirmed transaction
+        this.fastStats.misses += 1;
+        this.fastStats.missReasons['sell share unknown'] = (this.fastStats.missReasons['sell share unknown'] || 0) + 1;
+        this.streamQueue.push({ w, ev });
+        this.drainStream();
+        return null;
+      }
+    }
+    const swap = swapFromPumpTrade(trade, { signature: sig, slot: ev.slot ?? null, heldAfterRaw, receivedAt: ev.receivedAt || Date.now() });
+    if (!swap) return null;
+    this.fastStats.hits += 1;
+    let signal = null;
+    try {
+      signal = await this.processSignature(w, sig, { backfill: false, via: 'fast-logs', receivedAt: ev.receivedAt, knownSwap: swap });
+    } catch (err) {
+      this.seenSigs.delete(sig);
+      return null;
+    }
+    if (signal) {
+      this.streamStats.signals += 1;
+      if (signal.streamMs != null) {
+        this.fastStats.lagMs.push(signal.streamMs);
+        if (this.fastStats.lagMs.length > 50) this.fastStats.lagMs.shift();
+      }
+      this.confirmFastTrade(w, sig, swap).catch(() => {});
+    }
+    return signal;
+  }
+
+  /** Background check that a fast-detected trade really landed as read. */
+  async confirmFastTrade(w, sig, swap) {
+    const wait = (ms) => new Promise((r) => {
+      const t = setTimeout(r, ms);
+      t.unref?.();
+    });
+    for (const ms of this.confirmDelaysMs) {
+      await wait(ms);
+      if (!this.running) return 'stopped';
+      let tx = null;
+      try {
+        tx = await this.getTransaction(sig);
+      } catch {
+        continue; // RPC trouble: try again
+      }
+      if (!tx) continue;
+      const parsed = parseSwapFromTransaction(tx, w.address);
+      if (parsed && !parsed.skip && parsed.side === swap.side && parsed.tokenMint === swap.tokenMint) {
+        this.fastStats.confirmed += 1;
+        return 'confirmed';
+      }
+      return this.reportPhantom(w, sig, swap, parsed?.skip === 'failed transaction' ? 'trader trade failed on-chain' : `trader trade did not match (${parsed?.skip || 'different trade'})`);
+    }
+    // not found after ~60 s: make sure it really isn't there before calling it a phantom
+    try {
+      const st = await this.rpc('getSignatureStatuses', [[sig], { searchTransactionHistory: true }]);
+      const s = st?.value?.[0];
+      if (s && !s.err) {
+        this.fastStats.confirmed += 1;
+        return 'confirmed';
+      }
+      if (s?.err) return this.reportPhantom(w, sig, swap, 'trader trade failed on-chain');
+    } catch {
+      return 'unknown'; // can't tell: leave the copy alone
+    }
+    return this.reportPhantom(w, sig, swap, 'trader trade never confirmed (dropped)');
+  }
+
+  reportPhantom(w, sig, swap, reason) {
+    this.fastStats.phantoms += 1;
+    this.fastStats.lastPhantom = { signature: sig, wallet: w.address, side: swap.side, mint: swap.tokenMint, reason, at: Date.now() };
+    if (typeof this.onPhantomTrade === 'function') {
+      try {
+        this.onPhantomTrade({ signature: sig, wallet: w.address, side: swap.side, mint: swap.tokenMint, reason });
+      } catch {
+        // ignore
+      }
+    }
+    return 'phantom';
   }
 
   /**
@@ -733,6 +855,17 @@ export class SolanaWalletWatcher {
         notSwap: this.streamStats.notSwap,
         failedTx: this.streamStats.failedTx,
         signals: this.streamStats.signals,
+        fastDetect: {
+          on: Boolean(this.fastDetect()),
+          hits: this.fastStats.hits,
+          misses: this.fastStats.misses,
+          forgedIgnored: this.fastStats.forged,
+          confirmed: this.fastStats.confirmed,
+          phantoms: this.fastStats.phantoms,
+          missReasons: { ...this.fastStats.missReasons },
+          medianMs: this.fastStats.lagMs.length ? [...this.fastStats.lagMs].sort((a, b) => a - b)[Math.floor(this.fastStats.lagMs.length / 2)] : null,
+          lastPhantom: this.fastStats.lastPhantom,
+        },
         balanceMoves: this.streamStats.balanceMoves || 0,
         blocksRead: this.streamStats.blocksRead || 0,
         balanceFeed: this.useBalanceStream ? { ...this.balanceStream.status(), url: this.balanceStream.url } : null,
@@ -868,21 +1001,21 @@ export class SolanaWalletWatcher {
     throw lastErr;
   }
 
-  async processSignature(w, sig, { backfill, via = 'poll', receivedAt = null, waitForTx = false, tx: knownTx = null }) {
+  async processSignature(w, sig, { backfill, via = 'poll', receivedAt = null, waitForTx = false, tx: knownTx = null, knownSwap = null }) {
     if (this.seenSigs.has(sig)) return null;
     this.seenSigs.add(sig);
     if (this.seenSigs.size > 5000) this.seenSigs = new Set([...this.seenSigs].slice(-2500));
 
     const fast = Boolean(waitForTx || via === 'stream' || via === 'token-stream');
-    let tx = knownTx || (await this.getTransaction(sig, { fast }));
+    let tx = knownSwap ? null : knownTx || (await this.getTransaction(sig, { fast }));
     // A pushed trade (at 'processed' commitment) can arrive 30–150 ms before getTransaction serves it:
     // poll with fast micro-intervals (35ms, 55ms, 75ms…) instead of 200ms–700ms sleeps.
-    for (let i = 0; waitForTx && !tx && i < 15; i++) {
+    for (let i = 0; !knownSwap && waitForTx && !tx && i < 15; i++) {
       await new Promise((r) => setTimeout(r, 35 + i * 20));
       tx = await this.getTransaction(sig, { fast });
     }
     this.status.txParsed += 1;
-    const swap = parseSwapFromTransaction(tx, w.address);
+    const swap = knownSwap || parseSwapFromTransaction(tx, w.address);
     if (!swap || swap.skip) {
       const reason = swap?.skip || 'transaction not found';
       this.status.txSkipped += 1;

@@ -124,6 +124,9 @@ realTrader.capsOverride = () => engine.settings.realCaps || null;
 // Swap route (Settings → Trading & risk): Jupiter (default) or direct pump.fun with Jupiter fallback.
 // ODEX_SWAP_ROUTE=jupiter on Railway forces Jupiter whatever the setting says (emergency switch).
 realTrader.routeSetting = () => (process.env.ODEX_SWAP_ROUTE === 'jupiter' ? 'jupiter' : engine.settings.swapRoute === 'direct' ? 'direct' : 'jupiter');
+// Fast trade detection (Settings → Trading & risk): pump.fun trades read from the pushed logs.
+// ODEX_FAST_DETECT=off on Railway turns it off whatever the setting says (emergency switch).
+liveSignals.watcher.fastDetect = () => process.env.ODEX_FAST_DETECT !== 'off' && engine.settings.fastDetect === true;
 realTrader.priorityMicroLamports = () => Number(process.env.ODEX_DIRECT_PRIORITY_MICROLAMPORTS || 100_000);
 
 engine.adapter.liveHooks = realTrader.hooks();
@@ -1313,6 +1316,7 @@ export const server = http.createServer(async (req, res) => {
         }
         if (body.copyTopUps !== undefined) engine.settings.copyTopUps = Boolean(body.copyTopUps);
         if (body.swapRoute !== undefined) engine.settings.swapRoute = body.swapRoute === 'direct' ? 'direct' : 'jupiter';
+        if (body.fastDetect !== undefined) engine.settings.fastDetect = body.fastDetect === true || body.fastDetect === 'true';
         if (body.scorecard && typeof body.scorecard === 'object') {
           const sc = { ...engine.scorecardSettings() };
           if (body.scorecard.autoPause !== undefined) sc.autoPause = Boolean(body.scorecard.autoPause);

@@ -67,6 +67,12 @@ export class LiveSignalService {
     this.watcher.onSignal = (s) => this.handleSignal(s);
     this.watcher.onStatus = () => this.pushStatus();
     this.watcher.onTokenInfoLate = (mint, info) => this.applyLateTokenInfo(mint, info);
+    // fast trade detection: a copied trade whose trader trade never confirmed is closed
+    this.watcher.onPhantomTrade = (p) => {
+      const s = this.signals.find((x) => x.signature === p.signature);
+      if (s) s.phantom = p.reason;
+      return this.engine?.handlePhantomTrade?.(p);
+    };
     this.lastStatusPush = 0;
     this.statusTimer = null;
   }

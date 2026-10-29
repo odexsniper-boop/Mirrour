@@ -1107,6 +1107,29 @@ export class CopyTradingEngine {
     });
   }
 
+  /**
+   * Fast trade detection read a trader trade before it was confirmed, and it never landed.
+   * A copy opened by that buy is sold at once; a sell or top-up copy is only logged.
+   */
+  async handlePhantomTrade({ signature, side, mint, reason } = {}) {
+    if (!signature) return { closed: 0 };
+    if (!this.phantomLog) this.phantomLog = [];
+    const opened = this.positions.filter((p) => p.traderTx === signature && p.remainingTokens > 0);
+    this.phantomLog.unshift({ signature, side, mint, reason, at: Date.now(), positions: opened.map((p) => p.id) });
+    this.phantomLog.length = Math.min(this.phantomLog.length, 50);
+    this.emit('phantom_trade', { signature, side, mint, reason, positions: opened.length });
+    let closed = 0;
+    for (const p of opened) {
+      try {
+        const r = await this.executePositionSell(p.id, { sellPct: 100, cause: `auto-exit: ${reason}` });
+        if (r?.ok !== false) closed += 1;
+      } catch {
+        // the normal exit rules still cover it
+      }
+    }
+    return { closed };
+  }
+
   async executePositionSell(positionId, opts = {}) {
     // A sell YOU press (manual, Sell all, Panic sell) always tries again, even if earlier checks
     // said the tokens were gone: a temporary balance-read problem must never trap a position.

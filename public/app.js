@@ -2300,6 +2300,8 @@ function populateSettingsInputs() {
   document.getElementById('set-trading-asset').value = s.tradingAsset.solana || 'stable';
   const routeEl = document.getElementById('set-swap-route');
   if (routeEl) routeEl.value = s.swapRoute === 'direct' ? 'direct' : 'jupiter';
+  const fastEl = document.getElementById('set-fast-detect');
+  if (fastEl) fastEl.value = s.fastDetect === true ? 'true' : 'false';
   const topUpsEl = document.getElementById('set-copy-topups');
   if (topUpsEl) topUpsEl.value = s.copyTopUps ? 'true' : 'false';
   const scs = { autoPause: true, minTrades: 10, maxSlipPct: 20, maxLagSec: 10, ...(s.scorecard || {}) };
@@ -2357,6 +2359,7 @@ window.saveExecutionSettings = async function saveExecutionSettings() {
       tradingAsset: { solana: assetMode, bsc: assetMode, robinhood: assetMode, arc: 'stable' },
       copyTopUps: document.getElementById('set-copy-topups')?.value === 'true',
       swapRoute: document.getElementById('set-swap-route')?.value === 'direct' ? 'direct' : 'jupiter',
+      fastDetect: document.getElementById('set-fast-detect')?.value === 'true',
       ...(document.getElementById('set-sc-autopause')
         ? {
             scorecard: {
@@ -3366,7 +3369,7 @@ function renderLiveSignals() {
       const copied = (Array.isArray(s.copies) && s.copies.some((c) => c.ok)) || s.paperCopied;
       const ageChip = copied
         ? '<span class="age-chip ac-copied"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="8 12.5 11 15.5 16 9.5"/></svg>Copied</span>'
-        : s.via === 'stream'
+        : s.via === 'stream' || s.via === 'fast-logs'
           ? `<span class="age-chip ac-live" title="Pushed in real time${s.latencySec != null ? ` · seen ${s.latencySec}s after the trade` : ''}${s.streamMs != null ? ` · ready ${s.streamMs} ms after the push` : ''}">⚡ live</span>`
           : s.backfill
             ? '<span class="age-chip ac-hist">earlier</span>'

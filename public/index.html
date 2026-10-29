@@ -602,6 +602,13 @@
                 </select>
               </div>
               <div class="field">
+                <label for="set-fast-detect">Fast Trade Detection (pump.fun)</label>
+                <select id="set-fast-detect" class="input" title="Read the trader's pump.fun trade the moment Helius pushes it, instead of waiting for it to confirm">
+                  <option value="false">Off — wait for the trader's trade to confirm (Default)</option>
+                  <option value="true">On — copy ~1.5 s sooner; a copy whose trader trade never lands is closed</option>
+                </select>
+              </div>
+              <div class="field">
                 <label>Auto-pause Slow Traders</label>
                 <select id="set-sc-autopause" class="input" title="Pause a trader when the copies keep falling behind them">
                   <option value="true">ON — pause traders the bot can't keep up with (Default)</option>
