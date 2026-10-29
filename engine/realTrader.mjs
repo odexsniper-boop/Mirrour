@@ -506,7 +506,11 @@ export class RealTrader {
     let ixs;
     let minOut;
     try {
-      const budget = PD.computeBudgetIxs({ units: 220_000, microLamports: this.priorityMicroLamports() });
+      // Every transaction must be unique: two copies of the same size for the same coin, built in the
+      // same second with the same cached blockhash, would otherwise be byte-identical — one
+      // signature, one swap on-chain, but both booked. A per-swap compute limit makes them differ.
+      this.directNonce = ((this.directNonce || 0) + 1) % 50_000;
+      const budget = PD.computeBudgetIxs({ units: 220_000 + this.directNonce, microLamports: this.priorityMicroLamports() });
       if (side === 'buy') {
         minOut = (d.tokensOut * keep) / 10_000n;
         if (minOut <= 0n) return { fallback: true, error: 'minimum tokens is 0' };
@@ -561,6 +565,11 @@ export class RealTrader {
       inAmount = d.amount;
       outAmount = solDelta > 0n ? solDelta : 0n;
     }
+    // never send (or book) the same signature twice
+    if (!this.sentSigs) this.sentSigs = new Map();
+    for (const [k, t] of this.sentSigs) if (this.now() - t > 120_000) this.sentSigs.delete(k);
+    if (this.sentSigs.has(signed.signature)) return { fallback: true, error: 'identical transaction already sent — not sending it twice' };
+    this.sentSigs.set(signed.signature, this.now());
     // ----- send (main RPC + fast RPCs) and confirm -----
     const sendStart = this.now();
     let sig = signed.signature;
@@ -901,6 +910,12 @@ export class RealTrader {
       } catch (err) {
         return release(this.fail(`signing failed: ${err.message}`));
       }
+      // the same signature is never sent or booked twice (a reused order would be one swap, booked twice)
+      if (!this.sentSigs) this.sentSigs = new Map();
+      for (const [k, t] of this.sentSigs) if (this.now() - t > 120_000) this.sentSigs.delete(k);
+      const sigKey = signed.signature || signed.signedBase64.slice(4, 92);
+      if (this.sentSigs.has(sigKey)) return release(this.fail('this exact swap was already sent — not sending it twice'));
+      this.sentSigs.set(sigKey, this.now());
       // from here on the buy may reach the chain: it stays counted against the daily cap unless
       // it is known not to have landed (a lost response must not reopen the cap)
 

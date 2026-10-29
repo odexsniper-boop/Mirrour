@@ -307,3 +307,28 @@ test('PD12 a sell you press yourself skips the retry wait left by a failed sell'
   assert.equal(r.ok, true, r.error);
   assert.equal(w.tok, 0n);
 });
+
+test('PD13 two same-size Direct buys at the same moment are two different transactions (EARNY bug)', async () => {
+  const { trader, w, token } = world();
+  const [qa, qb] = await Promise.all([trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 10 }), trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 10 })]);
+  const [a, b] = await Promise.all([trader.execute({ side: 'buy', token, amountUsd: 10, quote: qa, slippagePct: 10 }), trader.execute({ side: 'buy', token, amountUsd: 10, quote: qb, slippagePct: 10 })]);
+  assert.equal(a.ok, true, a.error);
+  assert.equal(b.ok, true, b.error);
+  const sigs = w.sent.map((tx) => base58Encode(Buffer.from(tx, 'base64').subarray(1, 65)));
+  assert.equal(sigs.length, 2);
+  assert.notEqual(sigs[0], sigs[1], 'different signatures → two real swaps, not one swap booked twice');
+});
+
+test('PD14 the same signed transaction is never sent or booked twice', async () => {
+  const { trader, w, token } = world();
+  const q = await trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 10 });
+  trader.directNonce = 0;
+  const first = await trader.executeDirect({ side: 'buy', token, quote: q, slippagePct: 10 });
+  assert.equal(first.ok, true, first.error);
+  trader.directNonce = 0; // force the identical transaction again (same size, same cached blockhash)
+  const q2 = await trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 10 });
+  const again = await trader.executeDirect({ side: 'buy', token, quote: q2, slippagePct: 10 });
+  assert.equal(again.ok, undefined);
+  assert.match(again.error, /already sent/);
+  assert.equal(w.sent.length, 1);
+});
