@@ -137,6 +137,7 @@ engine.onUpdate((evt) => notifier.handleEngineEvent(evt));
 setInterval(() => notifier.scanAlerts(), 4000).unref?.();
 // On a public deploy, real trading needs a site password (otherwise anyone with the link could trade)
 const sendLog = []; // Bot Wallet → Send attempts (rate limit)
+const hideKeys = (msg) => redact(redact(String(msg), alchemy.apiKey), process.env.HELIUS_API_KEY);
 const realBlockedReason = ON_RAILWAY && !SITE_PASSWORD ? 'public deploy without ODEX_PASSWORD: real trading is disabled' : null;
 const startedAt = Date.now();
 let shuttingDownFlag = false;
@@ -1240,7 +1241,9 @@ export const server = http.createServer(async (req, res) => {
         chainId: body.chainId || 'all',
         panic: Boolean(body.panic),
       });
-      return sendJson(res, 200, { ...result, state: engine.getStateSnapshot() });
+      // only what the page needs per sell; errors without API keys
+      const results = (result.results || []).map((r) => ({ ok: Boolean(r?.ok), error: r?.error ? hideKeys(r.error) : undefined }));
+      return sendJson(res, 200, { ...result, results, state: engine.getStateSnapshot() });
     }
 
     if (pathname.startsWith('/api/positions/')) {
@@ -1258,7 +1261,7 @@ export const server = http.createServer(async (req, res) => {
           sellPct: Number(body.sellPct || 100),
           cause: 'manual sell',
         });
-        return sendJson(res, resSell.ok ? 200 : 400, { ...resSell, state: engine.getStateSnapshot() });
+        return sendJson(res, resSell.ok ? 200 : 400, { ...resSell, error: resSell.error ? hideKeys(resSell.error) : resSell.error, state: engine.getStateSnapshot() });
       }
 
       if (req.method === 'POST' && subAction === 'limit-orders') {

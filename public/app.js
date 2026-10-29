@@ -2047,11 +2047,13 @@ window.sellAllPositions = async function sellAllPositions(panic) {
   if (data.state) {
     engineState = data.state;
     renderTerminalAll();
+    const failed = (data.results || []).filter((r) => r && !r.ok);
+    const why = failed.length ? ` ${failed.length} failed: ${[...new Set(failed.map((r) => r.error || 'refused'))].slice(0, 2).join(' · ')}` : '';
     showToast(
       panic
-        ? `Panic sell complete: paused all follows and sold ${data.soldCount} positions.`
-        : `Sold ${data.soldCount} open positions.`,
-      panic ? 'warn' : 'good'
+        ? `Panic sell: paused all follows, sold ${data.soldCount} position${data.soldCount === 1 ? '' : 's'}.${why}`
+        : `Sold ${data.soldCount} position${data.soldCount === 1 ? '' : 's'}.${why}`,
+      failed.length ? 'danger' : panic ? 'warn' : 'good'
     );
   }
 };
