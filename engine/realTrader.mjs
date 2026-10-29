@@ -442,7 +442,7 @@ export class RealTrader {
     }
   }
 
-  async execute({ side, token, amountUsd, quote, slippagePct, tokenAmount, assetMode = 'native' }) {
+  async execute({ side, token, amountUsd, quote, slippagePct, tokenAmount, assetMode = 'native', newTokenAccount = false }) {
     if (!this.ready()) return this.fail(this.keyError || 'real trading is not set up (ODEX_TRADER_KEY missing)');
     const px = Number(this.solPrice()) || 0;
     if (!(px > 0)) return this.fail('SOL price not known yet');
@@ -541,6 +541,13 @@ export class RealTrader {
     const timing = { quoteMs, sendMs: this.now() - sendStart };
     let landed = exec && (exec.status === 'Success' || Number(exec.code) === 0);
     const signature = exec?.signature || signed.signature;
+    // The same signed swap was also sent straight to Solana: Jupiter can report "failed to land"
+    // while our own copy lands. Check the chain briefly before calling it failed — otherwise the
+    // tokens would sit in the wallet with no position tracking them.
+    if (exec && !landed && !execErr && this.fastRpcUrls?.length) {
+      const st = await this.waitForSignature(signature, side === 'sell' ? 4000 : 8000);
+      if (st === 'success') landed = true;
+    }
     if (!exec || (!landed && execErr)) {
       // response lost: look the transaction up on-chain before deciding
       const st = await this.waitForSignature(signature, 30_000);
@@ -564,7 +571,7 @@ export class RealTrader {
     const tokDec = await this.getDecimals(mint).catch(() => null);
     let fill;
     try {
-      fill = await this.readFill({ signature, side, mint, quoteMint, exec, order, tokDec });
+      fill = await this.readFill({ signature, side, mint, quoteMint, exec, order, tokDec, newTokenAccount });
     } catch (err) {
       // The swap DID land: never report it as failed (that would leave untracked tokens in the
       // wallet). Book it from the quote and say the numbers are estimated.
@@ -685,7 +692,7 @@ export class RealTrader {
    * Exact amounts: Jupiter's execute result where present, the on-chain transaction for the
    * network fee (fee + priority + new token-account rent).
    */
-  async readFill({ signature, side, mint, quoteMint, exec, order, tokDec }) {
+  async readFill({ signature, side, mint, quoteMint, exec, order, tokDec, newTokenAccount = false }) {
     const big = (v) => {
       try {
         return v === undefined || v === null || v === '' ? null : BigInt(String(v));
@@ -713,6 +720,9 @@ export class RealTrader {
       }
       if (!tx && i + 1 < maxTries) await this.sleep(waitMs);
     }
+    // Fast path (the transaction was not read): a first buy of a coin still paid the token
+    // account's rent. Count it, or rent reclaim would later book that same SOL as extra profit.
+    if (!tx && side === 'buy' && newTokenAccount) networkLamports += 2_039_280;
     if (tx?.meta) {
       const keys = (tx.transaction?.message?.accountKeys || []).map((k) => (typeof k === 'string' ? k : k.pubkey));
       const me = keys.indexOf(this.address);

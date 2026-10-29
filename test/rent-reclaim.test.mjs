@@ -50,7 +50,7 @@ test('RR2 only empty, unfrozen, own accounts are picked; SOL, USDC, open coins a
     acc('Empty111111111111111111111111111111111pump', 0),
     acc('Full1111111111111111111111111111111111pump', 5),
     acc('So11111111111111111111111111111111111111112', 0),
-    acc('EPjFWdd5AufqSSqeM2qJxdtd7cpb1E2GQQDQ6y8kvzVX', 0),
+    acc('EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 0),
     acc(OPEN, 0),
     acc('Frzn1111111111111111111111111111111111pump', 0, { state: 'frozen' }),
     acc('Auth1111111111111111111111111111111111pump', 0, { closeAuthority: rnd() }),

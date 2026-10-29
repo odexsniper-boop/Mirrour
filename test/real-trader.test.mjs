@@ -81,6 +81,10 @@ function world({ sol = 5, tokenPriceUsd = 0.00002, decimals = 6, executeMode = '
         w.txs.set(signature, { pre, post: { sol: w.sol, tok: w.tok }, fee: input === WSOL_MINT ? feeLamports : 5000 });
       };
       if (w.executeMode === 'fail') return reply({ status: 'Failed', code: -1000, error: 'Failed to land', signature });
+      if (w.executeMode === 'fail-but-landed') {
+        land(); // our own direct copy of the swap landed although Jupiter gave up
+        return reply({ status: 'Failed', code: -1000, error: 'Failed to land', signature });
+      }
       if (w.executeMode === 'timeout-landed') {
         land();
         const e = new Error('aborted');
@@ -112,6 +116,7 @@ function world({ sol = 5, tokenPriceUsd = 0.00002, decimals = 6, executeMode = '
       return { value: [t ? { confirmationStatus: 'confirmed', err: null } : null] };
     }
     if (method === 'getTransaction') {
+      if (w.hideTx) return null; // RPC hasn't indexed it yet (fast path)
       const t = w.txs.get(params[0]);
       if (!t) return null;
       return {
@@ -729,4 +734,31 @@ test('entry ceiling: max chase caps the real fill price, not only the quote', as
   assert.equal(x.e.positions.length, 1);
   assert.equal(x.w.orders, 1);
   assert.equal(x.lastOrder.slippageBps, '1500');
+});
+
+
+test('direct send: a swap Jupiter reports as failed but our own copy landed is booked, never left untracked', async () => {
+  const { w, trader } = world({ executeMode: 'fail-but-landed' });
+  trader.fastRpcUrls = ['https://fast-rpc.example'];
+  const { e, f } = engineFor(trader);
+  await e.processTraderSignal(buySig(f));
+  assert.equal(e.positions.length, 1, 'position opened for the tokens that really landed');
+  assert.ok(w.tok > 0n);
+  // without the direct send (no fast RPCs) a Jupiter failure stays a failure
+  const x = world({ executeMode: 'fail' });
+  x.trader.fastRpcUrls = ['https://fast-rpc.example'];
+  const y = engineFor(x.trader);
+  await y.e.processTraderSignal(buySig(y.f));
+  assert.equal(y.e.positions.length, 0);
+});
+
+test('fast fill path: a first buy still counts the token-account rent when the transaction is not read', async () => {
+  const { w, trader } = world();
+  w.hideTx = true;
+  const { e, f } = engineFor(trader);
+  await e.processTraderSignal(buySig(f));
+  const p = e.positions[0];
+  assert.ok(p, 'bought');
+  const rec = e.history.find((h) => h.side === 'buy' && h.status === 'filled');
+  assert.ok(rec.networkFeeUsd >= (2_039_280 / 1e9) * SOL_PX - 0.001, `network fee ${rec.networkFeeUsd} includes the ~0.002 SOL rent`);
 });
