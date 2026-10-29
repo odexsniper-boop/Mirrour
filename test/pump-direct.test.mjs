@@ -335,3 +335,27 @@ test('PD14 the same signed transaction is never sent or booked twice', async () 
   assert.match(again.error, /already sent/);
   assert.equal(w.sent.length, 1);
 });
+
+test('PD15 "sell everything" while a buy of the same coin is in progress sells only this position (EARNY race)', async () => {
+  const { trader, w, token, mint } = world({ heldTokens: 5_000_000_000n }); // 5,000 tokens in the wallet
+  trader.buyMintsInFlight = new Map([[mint, 1]]); // another copy's buy of this coin is landing
+  const q = await trader.quote({ side: 'sell', token, tokenAmount: 'all', slippagePct: null, positionTokens: 2000 });
+  const r = await trader.execute({ side: 'sell', token, tokenAmount: 'all', quote: q, slippagePct: null, positionTokens: 2000 });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(w.tok, 3_000_000_000n, 'the other position’s 3,000 tokens stay in the wallet');
+  // no buy in progress: everything goes (no dust left behind)
+  trader.buyMintsInFlight = new Map();
+  const q2 = await trader.quote({ side: 'sell', token, tokenAmount: 'all', slippagePct: null, positionTokens: 1000 });
+  const r2 = await trader.execute({ side: 'sell', token, tokenAmount: 'all', quote: q2, slippagePct: null, positionTokens: 1000 });
+  assert.equal(r2.ok, true, r2.error);
+  assert.equal(w.tok, 0n);
+});
+
+test('PD16 a buy marks its coin as in progress until shortly after it returns', async () => {
+  const { trader, token, mint } = world();
+  const q = await trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 10 });
+  const p = trader.execute({ side: 'buy', token, amountUsd: 10, quote: q, slippagePct: 10 });
+  assert.equal(trader.buyInProgress(mint), true);
+  await p;
+  assert.equal(trader.buyInProgress(mint), true, 'still marked right after (the engine books it next)');
+});

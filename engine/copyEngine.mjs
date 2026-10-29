@@ -1231,6 +1231,7 @@ export class CopyTradingEngine {
         tokenAmount,
         assetMode: pos.tradingAssetUsed,
         urgent: sellPressed,
+        positionTokens: tokensSold,
       });
     } catch (err) {
       if (!real) throw err;
@@ -1280,6 +1281,7 @@ export class CopyTradingEngine {
       assetMode: pos.tradingAssetUsed,
       slippagePct: sellSlippagePct,
       urgent: sellPressed,
+      positionTokens: tokensSold,
     }).catch((err) => {
       if (!real) throw err;
       return { ok: false, error: err.message };
@@ -2189,6 +2191,34 @@ export class CopyTradingEngine {
     this.alerts.unshift({ id: `alt-${randomUUID().slice(0, 8)}`, level: pnlUsd >= 0 ? 'success' : 'warning', title: `Recovered sell · $${pos.symbol}`, message: `This position was already sold on-chain for $${netProceedsUsd.toFixed(2)} (${pnlUsd >= 0 ? '+' : ''}$${pnlUsd.toFixed(2)}). The record is now fixed.`, timestamp: Date.now() });
     this.emit('position_sold', { position: pos, receipt });
     return receipt;
+  }
+
+  /**
+   * Correct the result of a real position closed by "Close record" (the bookkeeping only — nothing
+   * on-chain changes): the position, its history receipt and its PnL-log entry move together.
+   */
+  reviseRecordedClose(posId, newPnlUsd) {
+    const pos = this.positions.find((p) => p.id === posId);
+    if (!pos || pos.isPaper !== false || pos.remainingTokens > 0) return null;
+    const delta = Number((newPnlUsd - (Number(pos.realizedPnlUsd) || 0)).toFixed(4));
+    if (Math.abs(delta) < 0.005) return { delta: 0 };
+    const px = Number(CHAINS.solana?.nativePriceUsd) || 0;
+    pos.realizedPnlUsd = Number((Number(pos.realizedPnlUsd || 0) + delta).toFixed(4));
+    pos.soldUsd = Number(Math.max(0, Number(pos.soldUsd || 0) + delta).toFixed(4));
+    if (pos.soldSol != null && px > 0) pos.soldSol = Number(Math.max(0, pos.soldSol + delta / px).toFixed(6));
+    const entry = [...this.realizedLog].reverse().find((e) => e.pid === pos.id && e.closes);
+    if (entry) {
+      entry.pnl = Number((entry.pnl + delta).toFixed(2));
+      entry.posPnl = Number(Number(pos.realizedPnlUsd).toFixed(2));
+      if (px > 0) entry.sol = Number((entry.pnl / px).toFixed(6));
+    }
+    const receipt = this.history.find((h) => h.side === 'sell' && h.isPaper === false && h.tokenAddress === pos.tokenAddress && Math.abs((h.timestamp || 0) - (pos.closedAt || 0)) < 2000);
+    if (receipt) {
+      receipt.amountUsd = Number(Math.max(0, receipt.amountUsd + delta).toFixed(4));
+      receipt.pnlUsd = Number((receipt.pnlUsd + delta).toFixed(2));
+    }
+    this.emit('position_sold', { position: pos, receipt });
+    return { delta };
   }
 
   /** A real sell that did not go through: alert (once a minute per position), nothing booked. */

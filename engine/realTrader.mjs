@@ -350,7 +350,23 @@ export class RealTrader {
     return assetMode === 'stable' ? USDC_MINT : WSOL_MINT;
   }
 
-  async quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode = 'native', forceJupiter = false, urgent = false }) {
+  /** Buys of this coin still in progress (and for 3 s after they return, until they are booked). */
+  buyInProgress(mint) {
+    return (this.buyMintsInFlight?.get(mint) || 0) > 0;
+  }
+
+  /**
+   * "Sell everything" sells the whole wallet balance of the coin (no dust left). While a buy of the
+   * same coin is in progress, that balance can include tokens of a position not booked yet —
+   * then only this position's own tokens are sold.
+   */
+  sellAmountFor(mint, tokenAmount, positionTokens) {
+    if (tokenAmount === 'all' && this.buyInProgress(mint) && Number(positionTokens) > 0) return Number(positionTokens);
+    return tokenAmount;
+  }
+
+  async quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode = 'native', forceJupiter = false, urgent = false, positionTokens = null }) {
+    if (side === 'sell') tokenAmount = this.sellAmountFor(token.address, tokenAmount, positionTokens);
     if (!this.ready()) throw new Error(this.keyError || 'real trading is not set up (ODEX_TRADER_KEY missing)');
     const px = Number(this.solPrice()) || 0;
     if (!(px > 0)) throw new Error('SOL price not known yet');
@@ -801,7 +817,28 @@ export class RealTrader {
     }
   }
 
-  async execute({ side, token, amountUsd, quote, slippagePct, tokenAmount, assetMode = 'native', newTokenAccount = false, urgent = false }) {
+  async execute(args) {
+    const mint = args?.token?.address;
+    if (args?.side !== 'buy' || !mint) {
+      if (args?.side === 'sell') args = { ...args, tokenAmount: this.sellAmountFor(mint, args.tokenAmount, args.positionTokens) };
+      return this.executeNow(args);
+    }
+    if (!this.buyMintsInFlight) this.buyMintsInFlight = new Map();
+    this.buyMintsInFlight.set(mint, (this.buyMintsInFlight.get(mint) || 0) + 1);
+    try {
+      return await this.executeNow(args);
+    } finally {
+      // keep it marked a moment longer: the engine books the new position right after this returns
+      const t = setTimeout(() => {
+        const n = (this.buyMintsInFlight.get(mint) || 1) - 1;
+        if (n > 0) this.buyMintsInFlight.set(mint, n);
+        else this.buyMintsInFlight.delete(mint);
+      }, 3000);
+      t.unref?.();
+    }
+  }
+
+  async executeNow({ side, token, amountUsd, quote, slippagePct, tokenAmount, assetMode = 'native', newTokenAccount = false, urgent = false, positionTokens = null }) {
     if (!this.ready()) return this.fail(this.keyError || 'real trading is not set up (ODEX_TRADER_KEY missing)');
     const px = Number(this.solPrice()) || 0;
     if (!(px > 0)) return this.fail('SOL price not known yet');
@@ -903,7 +940,7 @@ export class RealTrader {
       let quoteMs = fresh ? quote._quoteMs ?? null : null;
       try {
         if (!fresh) {
-          const q = await this.quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode, forceJupiter: true, urgent });
+          const q = await this.quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode, forceJupiter: true, urgent, positionTokens });
           order = q._order;
           quoteMs = q._quoteMs ?? null;
         }

@@ -1268,25 +1268,37 @@ export const server = http.createServer(async (req, res) => {
       // on-chain first; the transaction that took the coins out (if found) sets the result.
       if (req.method === 'POST' && subAction === 'close-record') {
         const pos = engine.positions.find((p) => p.id === posId);
-        if (!pos || !(pos.remainingTokens > 0)) return sendJson(res, 404, { ok: false, error: 'Position not found or already closed.' });
+        // an already-fixed record can be checked again (its result is recomputed)
+        const refix = pos && !(pos.remainingTokens > 0) && pos.closeCause === 'record fixed to the on-chain result';
+        if (!pos || (!(pos.remainingTokens > 0) && !refix)) return sendJson(res, 404, { ok: false, error: 'Position not found or already closed.' });
         if (pos.isPaper !== false) return sendJson(res, 400, { ok: false, error: 'Only real positions need this — sell paper positions normally.' });
+        // other real positions in the same coin around the same time share its on-chain history
+        const t0 = pos.openedAt || 0;
+        const siblings = engine.positions.filter((p) => p.id !== pos.id && p.isPaper === false && p.tokenAddress === pos.tokenAddress && Math.abs((p.openedAt || 0) - t0) < 6 * 3600_000);
+        if (siblings.some((p) => p.remainingTokens > 0)) return sendJson(res, 409, { ok: false, error: 'Another open position holds this coin — sell or close that one first.' });
+        const since = Math.min(t0, ...siblings.map((p) => p.openedAt || t0));
         let found;
         try {
           const booked = new Set((engine.history || []).map((h) => h.txHash).filter(Boolean));
-          found = await realTrader.findTokenExit(pos.tokenAddress, { skip: booked, since: pos.openedAt || 0 });
+          found = await realTrader.findTokenExit(pos.tokenAddress, { skip: booked, since });
         } catch (err) {
           return sendJson(res, 502, { ok: false, error: `could not read the bot wallet: ${hideKeys(err.message)}` });
         }
         if (found.held > 0n) return sendJson(res, 409, { ok: false, error: 'The bot wallet still holds this coin — use Sell instead.' });
         const px = Number(CHAINS.solana.nativePriceUsd) || 0;
         const sale = found.sale;
-        // The coin's real result is what its on-chain transactions moved: every buy, sell and rent
-        // refund. Close so this position's total profit equals that (this also undoes a buy that was
-        // booked but never happened on-chain).
+        // The coin's real result is what its on-chain transactions moved (buys, sells, rent refund).
+        // Positions of the same coin that already booked their part keep it; this one gets the rest.
+        const othersPnl = siblings.reduce((sum, p) => sum + (Number(p.realizedPnlUsd) || 0), 0);
+        const target = found.onchain && px > 0 ? found.onchain.netSol * px - othersPnl : null;
+        if (refix) {
+          if (target === null) return sendJson(res, 409, { ok: false, error: 'could not read this coin\'s on-chain history' });
+          const r = engine.reviseRecordedClose(pos.id, target);
+          return sendJson(res, 200, { ok: true, revised: true, delta: r?.delta ?? 0, onchain: found.onchain, totalPnlUsd: Number(pos.realizedPnlUsd) || 0, othersPnlUsd: othersPnl, state: engine.getStateSnapshot() });
+        }
         let receivedUsd;
         let cause;
-        if (found.onchain && px > 0) {
-          const target = found.onchain.netSol * px;
+        if (target !== null) {
           receivedUsd = Math.max(0, target - (Number(pos.realizedPnlUsd) || 0) + (Number(pos.remainingCostUsd) || 0));
           cause = 'record fixed to the on-chain result';
         } else {
@@ -1294,7 +1306,7 @@ export const server = http.createServer(async (req, res) => {
           cause = sale ? 'sold outside the bot (record fixed)' : 'coins gone from the bot wallet (no sale found)';
         }
         const receipt = engine.bookExternalRealSell(pos, { receivedUsd, txHash: sale?.signature || null, at: sale?.t || Date.now(), cause });
-        return sendJson(res, 200, { ok: true, onchain: found.onchain || null, totalPnlUsd: Number(pos.realizedPnlUsd) || 0, sale: sale ? { signature: sale.signature, signatures: sale.signatures, receivedSol: sale.receivedSol } : null, receipt: receipt ? { pnlUsd: receipt.realizedPnlUsd ?? null } : null, state: engine.getStateSnapshot() });
+        return sendJson(res, 200, { ok: true, onchain: found.onchain || null, othersPnlUsd: othersPnl, totalPnlUsd: Number(pos.realizedPnlUsd) || 0, sale: sale ? { signature: sale.signature, signatures: sale.signatures, receivedSol: sale.receivedSol } : null, receipt: receipt ? { pnlUsd: receipt.pnlUsd ?? null } : null, state: engine.getStateSnapshot() });
       }
 
       if (req.method === 'POST' && subAction === 'limit-orders') {

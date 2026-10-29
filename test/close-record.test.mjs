@@ -64,3 +64,23 @@ test('CR2 coins gone: the unbooked sale is found; the booked "Initials" sell and
   const later = await trader.findTokenExit(MINT, { since: (now + 10) * 1000 });
   assert.equal(later.sale, null);
 });
+
+import { CopyTradingEngine } from '../engine/copyEngine.mjs';
+import { CHAINS } from '../engine/chainAdapters.mjs';
+
+test('CR3 a fixed record can be corrected: position, history and PnL log move together', () => {
+  CHAINS.solana.nativePriceUsd = 100;
+  const e = new CopyTradingEngine();
+  const pos = { id: 'p2', isPaper: false, remainingTokens: 0, realizedPnlUsd: -3.61, soldUsd: 6.43, soldSol: 0.0641, tokenAddress: MINT, closedAt: 1000, closeCause: 'record fixed to the on-chain result' };
+  e.positions = [pos];
+  e.history = [{ side: 'sell', isPaper: false, tokenAddress: MINT, timestamp: 1000, amountUsd: 6.43, pnlUsd: -3.61 }];
+  e.realizedLog = [{ t: 1000, pid: 'p2', closes: true, pnl: -3.61, posPnl: -3.61, sol: -0.0361 }];
+  const r = e.reviseRecordedClose('p2', -10.02);
+  assert.ok(Math.abs(r.delta + 6.41) < 1e-9);
+  assert.equal(pos.realizedPnlUsd, -10.02);
+  assert.equal(pos.soldUsd, 0.02);
+  assert.equal(e.history[0].pnlUsd, -10.02);
+  assert.equal(e.realizedLog[0].pnl, -10.02);
+  assert.equal(e.realizedLog[0].posPnl, -10.02);
+  assert.equal(e.reviseRecordedClose('nope', 1), null);
+});
