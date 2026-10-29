@@ -13,11 +13,13 @@
 import crypto from 'node:crypto';
 import { base58Decode, base58Encode } from './onchainMeta.mjs';
 import { reclaimRent as reclaimRentRun } from './rentReclaim.mjs';
+import * as PD from './pumpDirect.mjs';
+const PRICE_CODES = PD.PRICE_ERRORS;
 
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 export const USDC_MINT = 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v';
 const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
-const TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PXnBqCXEpPxuEb';
+const TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 const LAMPORTS = 1_000_000_000;
 const PKCS8_ED25519_PREFIX = Buffer.from('302e020100300506032b657004220420', 'hex');
 const DAY_MS = 86_400_000;
@@ -181,6 +183,11 @@ export class RealTrader {
     this.pendingBuySol = 0; // SOL of buys signed/sending but not finished yet
     this.prefetchedBalance = null; // { at, promise }: balance read while Jupiter quotes a buy
     this.lastBuyDoneAt = 0; // a balance read before this moment may still hold a finished buy's SOL
+    // Swap route (Settings): 'jupiter' (default) or 'direct' (pump.fun curve coins, Jupiter fallback)
+    this.routeSetting = () => 'jupiter';
+    this.priorityMicroLamports = () => 100_000;
+    this.directStats = { direct: 0, fallbacks: 0, priceSkips: 0, lastFallback: null, lastFallbackAt: null, lastDirectAt: null };
+    this.blockhashCache = null; // { hash, at }
   }
 
   get address() {
@@ -218,6 +225,8 @@ export class RealTrader {
       address: this.address,
       keyError: this.keyError,
       jupiterKey: Boolean(this.jupKey),
+      swapRoute: this.routeSetting(),
+      directStats: { ...this.directStats },
       caps: { maxSolPerTrade: this.caps.maxSolPerTrade, maxSolPerDay: this.caps.maxSolPerDay, reserveSol: this.caps.reserveSol, sellRetrySec: this.caps.sellRetrySec },
       envCaps: { maxSolPerTrade: this.envCaps.maxSolPerTrade, maxSolPerDay: this.envCaps.maxSolPerDay },
       spent24hSol: Number(this.spent24hSol().toFixed(6)),
@@ -341,12 +350,21 @@ export class RealTrader {
     return assetMode === 'stable' ? USDC_MINT : WSOL_MINT;
   }
 
-  async quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode = 'native' }) {
+  async quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode = 'native', forceJupiter = false }) {
     if (!this.ready()) throw new Error(this.keyError || 'real trading is not set up (ODEX_TRADER_KEY missing)');
     const px = Number(this.solPrice()) || 0;
     if (!(px > 0)) throw new Error('SOL price not known yet');
     if (Number.isInteger(token?.decimals)) this.decimals.set(token.address, token.decimals);
     const quoteMint = this.quoteAssetMint(assetMode);
+    // Direct pump.fun route: instant local quote from the curve (no Jupiter round trip)
+    if (!forceJupiter && this.routeSetting() === 'direct' && quoteMint === WSOL_MINT) {
+      try {
+        const dq = await this.directQuote({ side, token, amountUsd, slippagePct, tokenAmount, px });
+        if (dq) return dq;
+      } catch (err) {
+        this.noteFallback(`quote: ${err.message}`);
+      }
+    }
     const marketPx = Number(token.currentPriceUsd) || 0;
     const t0 = this.now();
     let order;
@@ -388,6 +406,191 @@ export class RealTrader {
       _side: side,
       _quoteMs: this.now() - t0,
     };
+  }
+
+  // ---------- direct pump.fun route ----------
+
+  noteFallback(why) {
+    this.directStats.fallbacks += 1;
+    this.directStats.lastFallback = String(why).slice(0, 200);
+    this.directStats.lastFallbackAt = this.now();
+  }
+
+  async recentBlockhash() {
+    const c = this.blockhashCache;
+    if (c && this.now() - c.at < 20_000) return c.hash;
+    const r = await this.rpc('getLatestBlockhash', [{ commitment: 'confirmed' }]);
+    const hash = r?.value?.blockhash || r?.blockhash;
+    if (!hash) throw new Error('no blockhash');
+    this.blockhashCache = { hash, at: this.now() };
+    return hash;
+  }
+
+  /**
+   * One RPC read (curve, mint, wallet, wallet's token account), then a local quote. Returns null
+   * when the coin can't go direct (it then uses Jupiter), or a quote shaped like Jupiter's.
+   */
+  async directQuote({ side, token, amountUsd, slippagePct, tokenAmount, px }) {
+    const mint = token.address;
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(mint || ''))) return null;
+    const t0 = this.now();
+    const curveAddr = PD.bondingCurveAddress(mint);
+    const [bhP, accP] = [this.recentBlockhash().catch(() => null), this.rpc('getMultipleAccounts', [[curveAddr, mint, this.address], { encoding: 'base64', commitment: 'processed' }])];
+    const acc = await accP;
+    const [curveAcc, mintAcc, userAcc] = acc?.value || [];
+    if (!curveAcc || curveAcc.owner !== PD.PUMP_PROGRAM) return null; // not on pump.fun's curve
+    const curve = PD.decodeCurve(curveAcc.data?.[0]);
+    const blocker = PD.directBlocker(curve);
+    if (blocker) {
+      this.noteFallback(blocker);
+      return null;
+    }
+    const baseTokenProgram = mintAcc?.owner;
+    if (baseTokenProgram !== PD.TOKEN_PROGRAM && baseTokenProgram !== PD.TOKEN_2022_PROGRAM) return null;
+    const userAta = PD.ataAddress(this.address, mint, baseTokenProgram);
+    const ataInfo = await this.rpc('getMultipleAccounts', [[userAta], { encoding: 'base64', commitment: 'processed' }]).catch(() => null);
+    const preTokens = ataInfo?.value?.[0] ? PD.tokenAccountAmount(ataInfo.value[0].data?.[0]) : 0n;
+    const ataExists = Boolean(ataInfo?.value?.[0]);
+    const tokDec = Number.isInteger(token?.decimals) ? token.decimals : this.decimals.get(mint) ?? 6;
+    this.decimals.set(mint, tokDec);
+    let quotedPriceUsd;
+    const d = { curve, baseTokenProgram, userAta, ataExists, preTokens, preLamports: BigInt(userAcc?.lamports || 0), tokDec, blockhash: await bhP };
+    if (side === 'buy') {
+      const lamportsIn = BigInt(Math.floor((amountUsd / px) * 1e9));
+      const tokensOut = PD.quoteBuy(curve, lamportsIn);
+      if (tokensOut <= 0n || tokensOut > curve.realTokenReserves) {
+        this.noteFallback('buy would empty the curve');
+        return null;
+      }
+      Object.assign(d, { lamportsIn, tokensOut });
+      quotedPriceUsd = amountUsd / (Number(tokensOut) / 10 ** tokDec);
+    } else {
+      if (preTokens <= 0n) throw Object.assign(new Error('the bot wallet holds none of this token'), { noTokens: true });
+      const want = tokenAmount === 'all' ? preTokens : BigInt(Math.floor(Number(tokenAmount) * 10 ** tokDec));
+      const amount = want > preTokens ? preTokens : want;
+      if (amount <= 0n) throw new Error('sell amount is too small');
+      const lamportsOut = PD.quoteSell(curve, amount);
+      Object.assign(d, { amount, lamportsOut });
+      const outUsd = (Number(lamportsOut) / 1e9) * px;
+      quotedPriceUsd = outUsd / (Number(amount) / 10 ** tokDec);
+    }
+    const marketPx = Number(token.currentPriceUsd) || 0;
+    const ref = marketPx > 0 ? marketPx : quotedPriceUsd;
+    return {
+      quotedPriceUsd,
+      expectedFillPriceUsd: quotedPriceUsd,
+      priceImpactPct: Math.min(99, Math.max(0, side === 'buy' ? (quotedPriceUsd / ref - 1) * 100 : (1 - quotedPriceUsd / ref) * 100)),
+      liquidityUsd: Number(token.liquidityUsd) || null,
+      maxAllowedSlippagePct: slippagePct,
+      timestamp: this.now(),
+      real: true,
+      route: 'direct',
+      _direct: d,
+      _slippagePct: slippagePct,
+      _side: side,
+      _quoteMs: this.now() - t0,
+    };
+  }
+
+  /**
+   * Build, simulate (with balance checks) and send a direct pump.fun swap.
+   * { ok, signature, exec, inAmount, sendMs } | { priceMoved } | { unknown, signature } | { fallback, error }
+   * `fallback` always means NOTHING was sent, so Jupiter can safely be used instead.
+   */
+  async executeDirect({ side, token, quote, slippagePct }) {
+    const d = quote._direct;
+    const mint = token.address;
+    const slip = Number.isFinite(slippagePct) && slippagePct > 0 ? slippagePct : side === 'sell' ? 15 : 10;
+    const keep = BigInt(Math.max(0, Math.floor((100 - Math.min(95, slip)) * 100))); // basis points kept
+    const buyback = PD.BUYBACK_FEE_RECIPIENTS[Math.floor(Math.random() * PD.BUYBACK_FEE_RECIPIENTS.length)];
+    let ixs;
+    let minOut;
+    try {
+      const budget = PD.computeBudgetIxs({ units: 220_000, microLamports: this.priorityMicroLamports() });
+      if (side === 'buy') {
+        minOut = (d.tokensOut * keep) / 10_000n;
+        if (minOut <= 0n) return { fallback: true, error: 'minimum tokens is 0' };
+        ixs = [...budget, PD.createAtaIdempotentIx({ payer: this.address, owner: this.address, mint, tokenProgram: d.baseTokenProgram }), PD.buyExactQuoteInIx({ user: this.address, mint, baseTokenProgram: d.baseTokenProgram, lamportsIn: d.lamportsIn, minTokensOut: minOut, buybackFeeRecipient: buyback })];
+      } else {
+        minOut = (d.lamportsOut * keep) / 10_000n;
+        ixs = [...budget, PD.sellIx({ user: this.address, mint, baseTokenProgram: d.baseTokenProgram, amount: d.amount, minSolOutput: minOut, buybackFeeRecipient: buyback })];
+      }
+    } catch (err) {
+      return { fallback: true, error: `build: ${err.message}` };
+    }
+    let signed;
+    try {
+      const blockhash = d.blockhash || (await this.recentBlockhash());
+      const { message } = PD.compileMessage({ payer: this.address, instructions: ixs, recentBlockhash: blockhash });
+      signed = PD.signLegacy(message, this.keypair);
+    } catch (err) {
+      return { fallback: true, error: `sign: ${err.message}` };
+    }
+    // ----- simulate and check the balance changes before sending anything -----
+    let sim;
+    try {
+      sim = await this.rpc('simulateTransaction', [signed.base64, { encoding: 'base64', commitment: 'processed', sigVerify: true, replaceRecentBlockhash: false, accounts: { encoding: 'base64', addresses: [this.address, d.userAta] } }]);
+    } catch (err) {
+      return { fallback: true, error: `simulation: ${err.message}` };
+    }
+    const simErr = sim?.value?.err;
+    if (simErr) {
+      const code = PD.customErrorCode(simErr);
+      if (PRICE_CODES.has(code)) return { priceMoved: true, error: `pump.fun refused: price past the limit (${code})` };
+      if (/BlockhashNotFound/i.test(JSON.stringify(simErr))) this.blockhashCache = null;
+      return { fallback: true, error: `simulation failed: ${JSON.stringify(simErr).slice(0, 160)}` };
+    }
+    const post = sim?.value?.accounts || [];
+    const postLamports = post[0] ? BigInt(post[0].lamports || 0) : null;
+    const postTokens = post[1] ? PD.tokenAccountAmount(post[1].data?.[0]) : side === 'sell' ? 0n : null;
+    if (postLamports === null || postTokens === null) return { fallback: true, error: 'simulation returned no balances' };
+    const tokDelta = postTokens - d.preTokens;
+    const solDelta = postLamports - d.preLamports;
+    let inAmount;
+    let outAmount;
+    if (side === 'buy') {
+      // tokens received at least the minimum; SOL spent no more than the budget + fees, rent and
+      // the one-time pump.fun volume account (≈0.0018 SOL) — 0.006 SOL margin
+      if (tokDelta < minOut) return { fallback: true, error: `simulation gave ${tokDelta} tokens, under the ${minOut} minimum` };
+      if (-solDelta > d.lamportsIn + 6_000_000n) return { fallback: true, error: `simulation spent ${-solDelta} lamports, more than expected` };
+      inAmount = d.lamportsIn;
+      outAmount = tokDelta;
+    } else {
+      if (-tokDelta !== d.amount) return { fallback: true, error: `simulation sold ${-tokDelta} tokens, expected ${d.amount}` };
+      if (solDelta < minOut - 200_000n) return { fallback: true, error: `simulation returned ${solDelta} lamports, under the minimum` };
+      inAmount = d.amount;
+      outAmount = solDelta > 0n ? solDelta : 0n;
+    }
+    // ----- send (main RPC + fast RPCs) and confirm -----
+    const sendStart = this.now();
+    let sig = signed.signature;
+    try {
+      const r = await this.rpc('sendTransaction', [signed.base64, { encoding: 'base64', skipPreflight: true, maxRetries: 3 }]);
+      if (typeof r === 'string') sig = r;
+    } catch (err) {
+      // the fast RPCs below still get it; the status check decides
+    }
+    this.blastSignedTransaction(signed.base64);
+    const st = await this.waitForSignature(sig, 25_000);
+    const sendMs = this.now() - sendStart;
+    if (st === 'unknown') return { unknown: true, signature: sig, error: 'sent but not confirmed in 25 s' };
+    if (st === 'failed') {
+      // it landed but failed: nothing changed except the network fee. Price errors are skips.
+      let code = null;
+      try {
+        const s2 = await this.rpc('getSignatureStatuses', [[sig], { searchTransactionHistory: true }]);
+        code = PD.customErrorCode(s2?.value?.[0]?.err);
+      } catch {
+        // ignore
+      }
+      if (PRICE_CODES.has(code)) return { priceMoved: true, error: `pump.fun refused: price moved past the limit while sending (${code})`, signature: sig };
+      return { fallback: true, sentFailed: true, signature: sig, error: `direct swap failed on-chain${code !== null ? ` (${code})` : ''}` };
+    }
+    this.directStats.direct += 1;
+    this.directStats.lastDirectAt = this.now();
+    // exact amounts from the simulation as a fallback; readFill prefers the real transaction
+    const exec = side === 'buy' ? { totalInputAmount: String(inAmount), totalOutputAmount: String(outAmount) } : { totalInputAmount: String(inAmount), totalOutputAmount: String(outAmount) };
+    return { ok: true, signature: sig, exec, inAmount: String(inAmount), sendMs };
   }
 
   /** How many raw tokens to sell: never more than the wallet holds. */
@@ -501,69 +704,101 @@ export class RealTrader {
       }
     }
 
-    // ----- order (reuse the quote's if it is fresh and for the same slippage) -----
-    let order = quote?._order;
-    const fresh = order && quote._side === side && quote._slippagePct === slippagePct && this.now() - order.fetchedAt < 8000;
-    let quoteMs = fresh ? quote._quoteMs ?? null : null;
-    try {
-      if (!fresh) {
-        const q = await this.quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode });
-        order = q._order;
-        quoteMs = q._quoteMs ?? null;
-      }
-    } catch (err) {
-      if (side === 'sell') this.sellBlockedUntil.set(mint, this.now() + this.caps.sellRetrySec * 1000);
-      // keep the reason flags: the engine pauses exits when the tokens are gone from the wallet
-      return release(this.fail(err.message, { backoff: Boolean(err.backoff), noTokens: Boolean(err.noTokens) }));
-    }
-
-    let signed;
-    try {
-      signed = signTransactionBase64(order.transaction, this.keypair);
-    } catch (err) {
-      return release(this.fail(`signing failed: ${err.message}`));
-    }
-    // from here on the buy may reach the chain: it stays counted against the daily cap unless
-    // it is known not to have landed (a lost response must not reopen the cap)
-
+    // ----- route: direct pump.fun swap (Settings → Swap route), else Jupiter -----
+    let order = null;
     let exec = null;
-    let execErr = null;
-    const sendStart = this.now();
-    // Blast the signed transaction directly (skipPreflight: true) to fast RPCs / Jito in parallel
-    this.blastSignedTransaction(signed.signedBase64);
-    try {
-      exec = await this.jup('/execute', { method: 'POST', body: { signedTransaction: signed.signedBase64, requestId: order.requestId }, timeoutMs: 45_000 });
-    } catch (err) {
-      execErr = err;
-    }
-
-    // copy speed, measured: Jupiter quote time and send → landed time
-    const timing = { quoteMs, sendMs: this.now() - sendStart };
-    let landed = exec && (exec.status === 'Success' || Number(exec.code) === 0);
-    const signature = exec?.signature || signed.signature;
-    // The same signed swap was also sent straight to Solana: Jupiter can report "failed to land"
-    // while our own copy lands. Check the chain briefly before calling it failed — otherwise the
-    // tokens would sit in the wallet with no position tracking them.
-    if (exec && !landed && !execErr && this.fastRpcUrls?.length) {
-      const st = await this.waitForSignature(signature, side === 'sell' ? 4000 : 8000);
-      if (st === 'success') landed = true;
-    }
-    if (!exec || (!landed && execErr)) {
-      // response lost: look the transaction up on-chain before deciding
-      const st = await this.waitForSignature(signature, 30_000);
-      landed = st === 'success';
-      if (st === 'unknown') {
-        this.record({ side, mint, symbol: token.symbol, signature, ok: null, error: `result unknown: ${execErr?.message || 'no response'}` });
+    let signature = null;
+    let timing = null;
+    let directNote = null;
+    if (quote?._direct && quote._side === side && quote._slippagePct === slippagePct && this.now() - quote.timestamp < 6000) {
+      const dr = await this.executeDirect({ side, token, quote, slippagePct });
+      if (dr.ok) {
+        exec = dr.exec;
+        signature = dr.signature;
+        order = { inAmount: dr.inAmount };
+        timing = { route: 'direct', quoteMs: quote._quoteMs ?? null, sendMs: dr.sendMs };
+      } else if (dr.priceMoved) {
+        this.directStats.priceSkips += 1;
+        release();
+        if (side === 'sell') this.sellBlockedUntil.set(mint, this.now() + this.caps.sellRetrySec * 1000);
+        this.record({ side, mint, symbol: token.symbol, signature: dr.signature || null, ok: false, route: 'direct', error: dr.error });
+        return this.fail(`price moved too far before we could copy — ${dr.error}`, { txHash: dr.signature || null });
+      } else if (dr.unknown) {
+        // sent but not confirmed: never fall back (that could buy twice) — check the wallet
+        this.record({ side, mint, symbol: token.symbol, signature: dr.signature, ok: null, route: 'direct', error: dr.error });
         if (side === 'sell') this.sellBlockedUntil.set(mint, this.now() + 30_000);
-        return this.fail(`swap result unknown (${execErr?.message || 'no response'}). Check the wallet on Solscan: ${signature}`, { unknown: true, txHash: signature });
+        return this.fail(`swap result unknown (${dr.error}). Check the wallet on Solscan: ${dr.signature}`, { unknown: true, txHash: dr.signature });
+      } else {
+        // nothing landed (or a failed swap changed nothing): use Jupiter instead
+        directNote = dr.error;
+        this.noteFallback(dr.error);
+        quote = null;
       }
     }
-    if (!landed) {
-      release(); // a swap that did not land does not use up the daily cap
-      if (side === 'sell') this.sellBlockedUntil.set(mint, this.now() + this.caps.sellRetrySec * 1000);
-      const why = exec?.error || (exec?.code !== undefined ? `Jupiter code ${exec.code}` : execErr?.message || 'swap failed');
-      this.record({ side, mint, symbol: token.symbol, signature, ok: false, error: why });
-      return this.fail(`swap did not go through: ${why}`, { txHash: exec?.signature || null });
+    if (!exec) {
+      // ----- order (reuse the quote's if it is fresh and for the same slippage) -----
+      order = quote?._order;
+      const fresh = order && quote._side === side && quote._slippagePct === slippagePct && this.now() - order.fetchedAt < 8000;
+      let quoteMs = fresh ? quote._quoteMs ?? null : null;
+      try {
+        if (!fresh) {
+          const q = await this.quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode, forceJupiter: true });
+          order = q._order;
+          quoteMs = q._quoteMs ?? null;
+        }
+      } catch (err) {
+        if (side === 'sell') this.sellBlockedUntil.set(mint, this.now() + this.caps.sellRetrySec * 1000);
+        // keep the reason flags: the engine pauses exits when the tokens are gone from the wallet
+        return release(this.fail(err.message, { backoff: Boolean(err.backoff), noTokens: Boolean(err.noTokens) }));
+      }
+
+      let signed;
+      try {
+        signed = signTransactionBase64(order.transaction, this.keypair);
+      } catch (err) {
+        return release(this.fail(`signing failed: ${err.message}`));
+      }
+      // from here on the buy may reach the chain: it stays counted against the daily cap unless
+      // it is known not to have landed (a lost response must not reopen the cap)
+
+      let execErr = null;
+      const sendStart = this.now();
+      // Blast the signed transaction directly (skipPreflight: true) to fast RPCs / Jito in parallel
+      this.blastSignedTransaction(signed.signedBase64);
+      try {
+        exec = await this.jup('/execute', { method: 'POST', body: { signedTransaction: signed.signedBase64, requestId: order.requestId }, timeoutMs: 45_000 });
+      } catch (err) {
+        execErr = err;
+      }
+
+      // copy speed, measured: Jupiter quote time and send → landed time
+      timing = { route: 'jupiter', quoteMs, sendMs: this.now() - sendStart, ...(directNote ? { directFallback: directNote } : {}) };
+      let landed = exec && (exec.status === 'Success' || Number(exec.code) === 0);
+      signature = exec?.signature || signed.signature;
+      // The same signed swap was also sent straight to Solana: Jupiter can report "failed to land"
+      // while our own copy lands. Check the chain briefly before calling it failed — otherwise the
+      // tokens would sit in the wallet with no position tracking them.
+      if (exec && !landed && !execErr && this.fastRpcUrls?.length) {
+        const st = await this.waitForSignature(signature, side === 'sell' ? 4000 : 8000);
+        if (st === 'success') landed = true;
+      }
+      if (!exec || (!landed && execErr)) {
+        // response lost: look the transaction up on-chain before deciding
+        const st = await this.waitForSignature(signature, 30_000);
+        landed = st === 'success';
+        if (st === 'unknown') {
+          this.record({ side, mint, symbol: token.symbol, signature, ok: null, error: `result unknown: ${execErr?.message || 'no response'}` });
+          if (side === 'sell') this.sellBlockedUntil.set(mint, this.now() + 30_000);
+          return this.fail(`swap result unknown (${execErr?.message || 'no response'}). Check the wallet on Solscan: ${signature}`, { unknown: true, txHash: signature });
+        }
+      }
+      if (!landed) {
+        release(); // a swap that did not land does not use up the daily cap
+        if (side === 'sell') this.sellBlockedUntil.set(mint, this.now() + this.caps.sellRetrySec * 1000);
+        const why = exec?.error || (exec?.code !== undefined ? `Jupiter code ${exec.code}` : execErr?.message || 'swap failed');
+        this.record({ side, mint, symbol: token.symbol, signature, ok: false, error: why });
+        return this.fail(`swap did not go through: ${why}`, { txHash: exec?.signature || null });
+      }
     }
     this.sellBlockedUntil.delete(mint);
 

@@ -595,6 +595,13 @@
                 </select>
               </div>
               <div class="field">
+                <label for="set-swap-route">Swap Route (real trades)</label>
+                <select id="set-swap-route" class="input" title="How real buys and sells are sent">
+                  <option value="jupiter">Jupiter — reliable, every coin (Default)</option>
+                  <option value="direct">Direct pump.fun — faster on curve coins, Jupiter as fallback</option>
+                </select>
+              </div>
+              <div class="field">
                 <label>Auto-pause Slow Traders</label>
                 <select id="set-sc-autopause" class="input" title="Pause a trader when the copies keep falling behind them">
                   <option value="true">ON — pause traders the bot can't keep up with (Default)</option>

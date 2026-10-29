@@ -491,7 +491,7 @@ test('sell fix: Token-2022 tokens missed by the mint lookup are still found and 
   trader.rpc = async (method, params) => {
     if (method === 'getTokenAccountsByOwner' && params[1]?.mint) return { value: [] };
     if (method === 'getTokenAccountsByOwner' && params[1]?.programId) {
-      if (params[1].programId !== 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PXnBqCXEpPxuEb' || w.tok <= 0n) return { value: [] };
+      if (params[1].programId !== 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb' || w.tok <= 0n) return { value: [] };
       return { value: [{ account: { data: { parsed: { info: { mint: MINT, tokenAmount: { amount: w.tok.toString(), decimals: 6 } } } } } }] };
     }
     return realRpc(method, params);

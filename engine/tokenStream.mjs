@@ -15,7 +15,7 @@
 import { base58Encode } from './onchainMeta.mjs';
 
 export const TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA';
-export const TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PXnBqCXEpPxuEb';
+export const TOKEN_2022_PROGRAM = 'TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb';
 
 /** Decode a token account's base64 data: mint (0–32), owner (32–64), amount u64 LE (64–72). */
 export function decodeTokenAccount(b64) {

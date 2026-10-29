@@ -2298,6 +2298,8 @@ function populateSettingsInputs() {
   document.getElementById('set-priority-mode').value = s.priorityFee.mode || 'normal';
   document.getElementById('set-retry-buys').value = String(Boolean(s.retryBuys));
   document.getElementById('set-trading-asset').value = s.tradingAsset.solana || 'stable';
+  const routeEl = document.getElementById('set-swap-route');
+  if (routeEl) routeEl.value = s.swapRoute === 'direct' ? 'direct' : 'jupiter';
   const topUpsEl = document.getElementById('set-copy-topups');
   if (topUpsEl) topUpsEl.value = s.copyTopUps ? 'true' : 'false';
   const scs = { autoPause: true, minTrades: 10, maxSlipPct: 20, maxLagSec: 10, ...(s.scorecard || {}) };
@@ -2354,6 +2356,7 @@ window.saveExecutionSettings = async function saveExecutionSettings() {
       retryBuys: document.getElementById('set-retry-buys').value === 'true',
       tradingAsset: { solana: assetMode, bsc: assetMode, robinhood: assetMode, arc: 'stable' },
       copyTopUps: document.getElementById('set-copy-topups')?.value === 'true',
+      swapRoute: document.getElementById('set-swap-route')?.value === 'direct' ? 'direct' : 'jupiter',
       ...(document.getElementById('set-sc-autopause')
         ? {
             scorecard: {
