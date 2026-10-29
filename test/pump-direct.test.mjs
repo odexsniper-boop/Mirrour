@@ -133,7 +133,7 @@ function world({ simMode = 'ok', landMode = 'success', curve = curveBytes(), hel
     }
     if (method === 'getLatestBlockhash') return { value: { blockhash: rndKey() } };
     if (method === 'getBalance') return { value: Number(w.sol) };
-    if (method === 'getTokenAccountsByOwner') return { value: w.tok > 0n && params[1].programId === PD.TOKEN_PROGRAM ? [{ pubkey: userAta, account: { data: { parsed: { info: { tokenAmount: { amount: String(w.tok), decimals: 6 } } } } } }] : [] };
+    if (method === 'getTokenAccountsByOwner') return { value: w.tok > 0n && (params[1].programId === PD.TOKEN_PROGRAM || params[1].mint === mint) ? [{ pubkey: userAta, account: { data: { parsed: { info: { mint, tokenAmount: { amount: String(w.tok), decimals: 6 } } } } } }] : [] };
     if (method === 'simulateTransaction') {
       w.sims++;
       const tx = Buffer.from(params[0], 'base64');
@@ -284,4 +284,26 @@ test('PD10 Jupiter setting (default) never touches the direct route', async () =
   assert.ok(w.jupiterOrders >= 1);
   const fresh = new RealTrader({ env: {}, rpc: async () => null, solPrice: () => SOL_PX });
   assert.equal(fresh.routeSetting(), 'jupiter', 'default is Jupiter');
+});
+
+test('PD11 a Direct SELL refused on price is never dropped: Jupiter takes it (live slippage)', async () => {
+  const { trader, w, token } = world({ simMode: 'price', heldTokens: 5_000_000_000n });
+  const q = await trader.quote({ side: 'sell', token, tokenAmount: 'all', slippagePct: null });
+  assert.equal(q.route, 'direct');
+  const r = await trader.execute({ side: 'sell', token, tokenAmount: 'all', quote: q, slippagePct: null });
+  assert.equal(w.sent.length, 0, 'nothing direct was sent');
+  assert.ok(w.jupiterOrders >= 1, `handed to Jupiter (${JSON.stringify(r)})`);
+  assert.doesNotMatch(String(r.error || ''), /price moved too far before we could copy/);
+  assert.equal(trader.directStats.priceSkips, 0);
+});
+
+test('PD12 a sell you press yourself skips the retry wait left by a failed sell', async () => {
+  const { trader, w, token, mint } = world({ heldTokens: 5_000_000_000n });
+  trader.sellBlockedUntil.set(mint, Date.now() + 10 ** 9);
+  const blocked = await trader.execute({ side: 'sell', token, tokenAmount: 'all', quote: null, slippagePct: null });
+  assert.match(blocked.error, /before retrying this sell/);
+  const q = await trader.quote({ side: 'sell', token, tokenAmount: 'all', slippagePct: null, urgent: true });
+  const r = await trader.execute({ side: 'sell', token, tokenAmount: 'all', quote: q, slippagePct: null, urgent: true });
+  assert.equal(r.ok, true, r.error);
+  assert.equal(w.tok, 0n);
 });

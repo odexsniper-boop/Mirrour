@@ -350,7 +350,7 @@ export class RealTrader {
     return assetMode === 'stable' ? USDC_MINT : WSOL_MINT;
   }
 
-  async quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode = 'native', forceJupiter = false }) {
+  async quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode = 'native', forceJupiter = false, urgent = false }) {
     if (!this.ready()) throw new Error(this.keyError || 'real trading is not set up (ODEX_TRADER_KEY missing)');
     const px = Number(this.solPrice()) || 0;
     if (!(px > 0)) throw new Error('SOL price not known yet');
@@ -379,7 +379,7 @@ export class RealTrader {
       const tokensOut = Number(order.outAmount) / 10 ** tokDec;
       quotedPriceUsd = tokensOut > 0 ? amountUsd / tokensOut : 0;
     } else {
-      const until = this.sellBlockedUntil.get(token.address) || 0;
+      const until = urgent ? 0 : this.sellBlockedUntil.get(token.address) || 0;
       if (this.now() < until) throw Object.assign(new Error(`waiting ${Math.ceil((until - this.now()) / 1000)} s before retrying this sell`), { backoff: true });
       const [dec, held] = await Promise.all([this.getDecimals(token.address), this.getTokenBalanceRaw(token.address)]);
       tokDec = dec;
@@ -731,7 +731,7 @@ export class RealTrader {
     }
   }
 
-  async execute({ side, token, amountUsd, quote, slippagePct, tokenAmount, assetMode = 'native', newTokenAccount = false }) {
+  async execute({ side, token, amountUsd, quote, slippagePct, tokenAmount, assetMode = 'native', newTokenAccount = false, urgent = false }) {
     if (!this.ready()) return this.fail(this.keyError || 'real trading is not set up (ODEX_TRADER_KEY missing)');
     const px = Number(this.solPrice()) || 0;
     if (!(px > 0)) return this.fail('SOL price not known yet');
@@ -739,7 +739,7 @@ export class RealTrader {
     const mint = token.address;
     const quoteMint = this.quoteAssetMint(assetMode);
 
-    if (side === 'sell') {
+    if (side === 'sell' && !urgent) {
       const until = this.sellBlockedUntil.get(mint) || 0;
       if (this.now() < until) return this.fail(`waiting ${Math.ceil((until - this.now()) / 1000)} s before retrying this sell`, { backoff: true });
     }
@@ -803,6 +803,11 @@ export class RealTrader {
         signature = dr.signature;
         order = { inAmount: dr.inAmount };
         timing = { route: 'direct', quoteMs: quote._quoteMs ?? null, sendMs: dr.sendMs };
+      } else if (dr.priceMoved && side === 'sell') {
+        // a sell must get out: pump.fun refused our limit, so Jupiter (live slippage) takes it
+        directNote = dr.error;
+        this.noteFallback(`sell: ${dr.error}`);
+        quote = null;
       } else if (dr.priceMoved) {
         this.directStats.priceSkips += 1;
         release();
@@ -828,7 +833,7 @@ export class RealTrader {
       let quoteMs = fresh ? quote._quoteMs ?? null : null;
       try {
         if (!fresh) {
-          const q = await this.quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode, forceJupiter: true });
+          const q = await this.quote({ side, token, amountUsd, slippagePct, tokenAmount, assetMode, forceJupiter: true, urgent });
           order = q._order;
           quoteMs = q._quoteMs ?? null;
         }

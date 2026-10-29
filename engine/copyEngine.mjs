@@ -1211,6 +1211,8 @@ export class CopyTradingEngine {
     // more room so it always gets out: Jupiter auto → 25% → 50%
     if (real && userSellSlip === null && pos.realSellFails > 0) sellSlippagePct = pos.realSellFails >= 2 ? 50 : 25;
 
+    // a sell you press yourself never waits for an earlier failed sell's retry timer
+    const sellPressed = /manual|sell all|panic|initials/i.test(String(cause || ''));
     let quote;
     try {
       quote = await this.adapter.getSwapQuote({
@@ -1228,6 +1230,7 @@ export class CopyTradingEngine {
         paper: Boolean(pos.isPaper),
         tokenAmount,
         assetMode: pos.tradingAssetUsed,
+        urgent: sellPressed,
       });
     } catch (err) {
       if (!real) throw err;
@@ -1276,6 +1279,7 @@ export class CopyTradingEngine {
       tokenAmount,
       assetMode: pos.tradingAssetUsed,
       slippagePct: sellSlippagePct,
+      urgent: sellPressed,
     }).catch((err) => {
       if (!real) throw err;
       return { ok: false, error: err.message };

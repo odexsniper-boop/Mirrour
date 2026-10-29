@@ -344,11 +344,14 @@ test('audit: after a failed sell, retries wait (no Jupiter quote spam every tick
   await e.processTraderSignal(buySig(f));
   const p = e.positions[0];
   w.executeMode = 'fail';
-  await e.executePositionSell(p.id, { sellPct: 100 });
+  await e.executePositionSell(p.id, { sellPct: 100, cause: 'stop-loss hit' });
   const orders = w.orders;
-  await e.executePositionSell(p.id, { sellPct: 100 });
-  await e.executePositionSell(p.id, { sellPct: 100 });
-  assert.equal(w.orders, orders, 'no new Jupiter orders during the back-off');
+  await e.executePositionSell(p.id, { sellPct: 100, cause: 'stop-loss hit' });
+  await e.executePositionSell(p.id, { sellPct: 100, cause: 'stop-loss hit' });
+  assert.equal(w.orders, orders, 'no new Jupiter orders during the back-off (automatic exits)');
+  // a sell you press yourself tries again straight away
+  await e.executePositionSell(p.id, { sellPct: 100, cause: 'manual sell' });
+  assert.ok(w.orders > orders, 'manual sell skips the back-off');
 });
 
 test('audit: tokens moved out of the bot wallet pause exits after 3 checks (one alert)', async () => {

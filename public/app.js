@@ -1979,25 +1979,40 @@ window.renderHistoryTable = function renderHistoryTable() {
 // ============================================================================
 
 window.sellPosition = async function sellPosition(posId, modeOrPct) {
+  const pos = engineState?.positions?.find((p) => p.id === posId);
+  const isReal = pos && pos.isPaper === false;
+  const what = modeOrPct === 'initials' ? 'enough to recover your cost (initials)' : `${Number(modeOrPct)}%`;
   if (uiPrefs().confirmSells) {
-    const pos = engineState?.positions?.find((p) => p.id === posId);
-    const what = modeOrPct === 'initials' ? 'enough to recover your cost (initials)' : `${Number(modeOrPct)}%`;
-    const ok = await confirmAction({ title: `Sell ${what} of $${pos?.symbol || 'this position'}?`, message: 'Sold at the current market price (paper trade). You can turn this question off in Settings → Security.', confirmLabel: 'Sell', danger: true });
+    const ok = await confirmAction({ title: `Sell ${what} of $${pos?.symbol || 'this position'}?`, message: `Sold at the current market price (${isReal ? 'real SOL — sent on-chain' : 'paper trade'}). You can turn this question off in Settings → Security.`, confirmLabel: 'Sell', danger: true });
     if (!ok) return;
   }
+  if (!window.__sellsInFlight) window.__sellsInFlight = new Set();
+  if (window.__sellsInFlight.has(posId)) return showToast('This sell is still going through…', 'warn');
+  window.__sellsInFlight.add(posId);
+  if (isReal) showToast(`Selling ${what} of $${pos?.symbol || ''}… (a real sell takes a few seconds)`, 'good');
   const payload = modeOrPct === 'initials' ? { mode: 'initials' } : { sellPct: Number(modeOrPct) };
-  const res = await fetch(`/api/positions/${posId}/sell`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  if (!data.ok) {
-    showToast(data.error || 'Sell refused', 'danger');
-  }
-  if (data.state) {
-    engineState = data.state;
-    renderTerminalAll();
+  try {
+    const res = await fetch(`/api/positions/${posId}/sell`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    let data;
+    try {
+      data = await res.json();
+    } catch {
+      data = { ok: false, error: `the server answered ${res.status} — it may be restarting, try again in a moment` };
+    }
+    if (!data.ok) showToast(`Sell failed: ${data.error || 'refused'}`, 'danger');
+    else showToast(`Sold ${what} of $${pos?.symbol || ''}`, 'good');
+    if (data.state) {
+      engineState = data.state;
+      renderTerminalAll();
+    }
+  } catch {
+    showToast('Sell failed: could not reach the Odex server (it may be restarting after an update) — try again in a moment', 'danger');
+  } finally {
+    window.__sellsInFlight.delete(posId);
   }
 };
 
