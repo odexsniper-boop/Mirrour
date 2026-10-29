@@ -6219,7 +6219,7 @@ window.saveDaxDaily = async function saveDaxDaily() {
 // from the server (Claude with read-only tools when ANTHROPIC_API_KEY is set, else basic mode).
 // ============================================================================
 const daxc = { open: false, msgs: [], busy: false, status: null, rec: null, recOn: false, call: null };
-const DAX_CHIPS = ['Why did my last real trades lose?', 'How did the trader do on the coins we lost?', 'What should I change in my settings?', 'How much SOL is left in the bot wallet?'];
+const DAX_CHIPS = ['What is the delay right now?', 'Why were trades skipped?', 'Why did my last real trades lose?', 'How much did we make today?', 'What are my open positions?', 'How much SOL is left in the bot wallet?'];
 try {
   const saved = JSON.parse(localStorage.getItem('odex.daxChat') || '[]');
   if (Array.isArray(saved)) daxc.msgs = saved.slice(-40);
@@ -6244,7 +6244,7 @@ async function loadDaxChatStatus() {
   }
   const st = document.getElementById('dc-status');
   if (st) {
-    st.textContent = daxc.status?.ai ? 'Online · reads all your trades' : 'Basic mode · no API key';
+    st.textContent = daxc.status?.ai ? 'Online · reads all your trades' : 'Online · answers from your Odex records';
     st.title = daxc.status?.ai ? '' : 'Add ANTHROPIC_API_KEY (Railway variables or your .env) for full chat';
   }
   document.getElementById('dax-fab')?.classList.toggle('is-basic', !daxc.status?.ai);
@@ -6280,7 +6280,7 @@ function renderDaxChat(typing = false) {
       .map((m) => {
         if (m.role === 'user') return `<div class="dc-msg me">${esc(m.text)}${m.voice ? '<span class="dc-meta">🎙 voice</span>' : ''}</div>`;
         if (m.role === 'error') return `<div class="dc-msg err">${esc(m.text)}</div>`;
-        return `<div class="dc-msg dax">${daxMarkdownHtml(m.text).replace(/<table>/g, '<div class="dax-tbl-wrap"><table>').replace(/<\/table>/g, '</table></div>')}${m.mode === 'basic' ? '<span class="dc-meta">basic mode</span>' : ''}</div>`;
+        return `<div class="dc-msg dax">${daxMarkdownHtml(m.text).replace(/<table>/g, '<div class="dax-tbl-wrap"><table>').replace(/<\/table>/g, '</table></div>')}</div>`;
       })
       .join('') +
     (typing ? '<div class="dc-typing"><img src="/dax/dax-side.png" alt="" />Dax is looking at your trades…</div>' : '');

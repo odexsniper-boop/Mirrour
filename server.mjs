@@ -19,7 +19,7 @@ import zlib from 'node:zlib';
 import { RealTrader } from './engine/realTrader.mjs';
 import { Notifier } from './engine/notifier.mjs';
 import { buildDaxReport } from './engine/dax.mjs';
-import { DaxChat, basicDaxAnswer, periodFromQuestion } from './engine/daxChat.mjs';
+import { DaxChat, smartDaxAnswer, periodFromQuestion } from './engine/daxChat.mjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -368,7 +368,22 @@ export const daxChat = new DaxChat({
       };
     },
   },
-  basicAnswer: (q, opts) => basicDaxAnswer(q, daxReport(periodFromQuestion(q)), opts),
+  // no API key: Dax still answers the question asked (delay, skips, PnL, positions…) from the records
+  basicAnswer: (q, opts) =>
+    smartDaxAnswer(
+      q,
+      {
+        report: daxReport(periodFromQuestion(q)),
+        openPositions: () => daxChat.tools.get_open_positions({}),
+        traderTrades: (o) => daxChat.tools.get_trader_trades(o || {}),
+        settings: () => daxChat.tools.get_settings({}),
+        signals: liveSignals.signals || [],
+        realTrades: realTrader.trades || [],
+        swapRoute: realTrader.routeSetting(),
+        fastDetect: { on: Boolean(liveSignals.watcher.fastDetect?.()), ...(liveSignals.watcher.fastStats || {}) },
+      },
+      opts
+    ),
 });
 
 // Daily report to Telegram / Discord at the chosen UTC hour (once a day, only on the trading copy)

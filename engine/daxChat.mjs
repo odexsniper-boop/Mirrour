@@ -190,3 +190,170 @@ export function periodFromQuestion(q) {
   if (/today|this morning|tonight/.test(s)) return 'today';
   return '24h';
 }
+
+// ---------------------------------------------------------------------------------------------
+// Smart basic mode (no API key): Dax works out what the question is about and answers it from
+// the bot's own records (read-only), instead of reading out the whole report every time.
+// ---------------------------------------------------------------------------------------------
+const usd = (v) => {
+  const n = Number(v) || 0;
+  return `${n < 0 ? '−' : n > 0 ? '+' : ''}$${Math.abs(n).toFixed(2)}`;
+};
+const pct = (v) => (Number.isFinite(Number(v)) && v !== null ? `${Number(v) >= 0 ? '+' : '−'}${Math.abs(Number(v)).toFixed(1)}%` : '—');
+const secs = (ms) => (Number.isFinite(ms) && ms !== null ? (ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`) : '—');
+const med = (a) => {
+  const v = a.filter((x) => Number.isFinite(x)).sort((x, y) => x - y);
+  return v.length ? v[Math.floor(v.length / 2)] : null;
+};
+const ago = (t) => {
+  const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+  return s < 90 ? `${s}s ago` : s < 5400 ? `${Math.round(s / 60)}m ago` : `${Math.round(s / 3600)}h ago`;
+};
+
+export const DAX_TOPICS = [
+  ['help', /^\s*(hi|hello|hey|yo|sup|salam|help|menu)\b|what can you|who are you|how do i use/i],
+  ['delay', /delay|latenc|speed|slow|fast|\bms\b|millisec|how quick|lag\b|behind the trader|seconds? (late|behind)/i],
+  ['skips', /skip|miss(ed)?\b|not cop|did ?n[o']?t cop|why.*(not|n't|no).*(buy|cop)|chase|blocked|rejected/i],
+  ['vs', /\bvs\b|versus|against|compar|trader (won|win|made|profit)|why.*(lost|lose|losing)|decu (won|win|made)/i],
+  ['open', /\bopen\b|holding|position|\bbags?\b|what do (i|we) (hold|have)/i],
+  ['recent', /last trades?|recent|closed|history|latest trades?|last (buy|sell)s?/i],
+  ['pnl', /pnl|p&l|profit|\bloss|\blost\b|\blose\b|losing|\bwin|made|make|earn|result|perform|how (am|are|did|is) (i|we|it|the bot)|money/i],
+  ['wallet', /wallet|balance|sol left|how much sol|funds|buys? left/i],
+  ['settings', /setting|limit|max chase|config|route|jupiter|direct|stop.?loss|take.?profit|fast (trade )?detect|paper mode|real mode/i],
+  ['trader', /(decu|trader)('?s)? (trades|buys|sells|bought|sold|doing)|what did .* (buy|sell)|trader activity/i],
+  ['report', /report|summary|overview|findings|status|how('?s| is) (it|everything) going/i],
+];
+
+export function daxTopics(question) {
+  const q = String(question || '');
+  const hits = DAX_TOPICS.filter(([, re]) => re.test(q)).map(([k]) => k);
+  // "why did we lose" is a vs-trader question, not a plain PnL question
+  if (hits.includes('vs') && hits.includes('pnl')) hits.splice(hits.indexOf('pnl'), 1);
+  return hits;
+}
+
+/**
+ * ctx: { report, openPositions(), traderTrades({hours,limit}), settings(), signals[], realTrades[],
+ *        fastDetect, swapRoute, directStats }
+ */
+export function smartDaxAnswer(question, ctx, { voice = false } = {}) {
+  const topics = daxTopics(question);
+  const r = ctx.report;
+  const period = r?.period?.label?.toLowerCase() || 'the last 24 hours';
+  const parts = [];
+  const add = (title, lines) => {
+    if (!lines || !lines.length) return;
+    parts.push(voice ? lines.join(' ') : `**${title}**\n${lines.map((l) => (l.startsWith('  ') ? l : `• ${l}`)).join('\n')}`);
+  };
+
+  const sections = {
+    help: () =>
+      add('Hi, I’m Dax', [
+        'I read the Odex records and answer from them. Try:',
+        '“what is the delay right now?”',
+        '“why were trades skipped?”',
+        '“how much did we make today?”',
+        '“what are my open positions?”',
+        '“last trades” · “us vs Decu” · “wallet balance” · “settings”',
+      ]),
+    delay: () => {
+      const since = Date.now() - 24 * 3600_000;
+      const sigs = (ctx.signals || []).filter((s) => !s.backfill && (s.detectedAt || 0) >= since);
+      const copied = sigs.filter((s) => (s.copies || []).some((c) => c.ok));
+      const spotMs = med(sigs.map((s) => (s.blockTime && s.detectedAt ? s.detectedAt - s.blockTime : null)));
+      const pushMs = med(sigs.map((s) => Number(s.streamMs)));
+      const copyMs = med(copied.flatMap((s) => (s.copies || []).filter((c) => c.ok).map((c) => Number(c.handledMs))));
+      const orders = (ctx.realTrades || []).filter((t) => t.ok && t.timing && (t.t || 0) >= since);
+      const sendMs = med(orders.map((t) => Number(t.timing.sendMs)));
+      const fast = sigs.filter((s) => s.via === 'fast-logs').length;
+      const lines = [];
+      if (!sigs.length) lines.push(`No live trades from your traders in the last 24 h, so there is nothing to measure yet.`);
+      else {
+        lines.push(`Trader trade → Odex sees it: ~${secs(spotMs)} (median of ${sigs.length} live trades)`);
+        if (pushMs !== null) lines.push(`Push → signal ready: ${secs(pushMs)}`);
+        if (copyMs !== null) lines.push(`Signal → copy done: ${secs(copyMs)}`);
+        if (sendMs !== null) lines.push(`Real order sent → landed: ${secs(sendMs)} (${orders.length} real orders)`);
+        const total = [spotMs, copyMs].every((x) => x !== null) ? spotMs + copyMs : null;
+        if (total !== null) lines.push(`Total, trader → our copy: ~${secs(total)}`);
+        lines.push(`Fast-detected (read from the push): ${fast} of ${sigs.length}`);
+        const last = copied.slice(0, voice ? 1 : 3);
+        if (last.length && !voice) {
+          lines.push('Last copies:');
+          for (const s of last) {
+            const c = (s.copies || []).find((x) => x.ok);
+            lines.push(`  ${s.symbol} ${s.side} — seen ${secs(s.blockTime ? s.detectedAt - s.blockTime : null)} after the trader, copied in ${secs(Number(c?.handledMs))} (${s.via === 'fast-logs' ? 'fast detect' : s.via || 'poll'})`);
+          }
+        }
+      }
+      lines.push(`Swap route: ${ctx.swapRoute === 'direct' ? 'Direct pump.fun' : 'Jupiter'} · Fast Trade Detection: ${ctx.fastDetect?.on ? 'on' : 'off'}${!ctx.fastDetect?.on || ctx.swapRoute !== 'direct' ? ' — turn both on in Settings → Trading & risk for ~1 s copies' : ''}`);
+      if (ctx.fastDetect?.on && ctx.fastDetect.phantoms) lines.push(`Phantom trades closed (trader trade never landed): ${ctx.fastDetect.phantoms}`);
+      add('Delay', lines);
+    },
+    skips: () => {
+      const lines = [];
+      for (const t of r?.data?.traders || []) {
+        if (!t.buysSeen) continue;
+        lines.push(`${t.handle}: ${t.buysSeen} buys seen, ${t.copiedBuys} copied, ${t.missedBuys} skipped`);
+        for (const [why, n] of t.reasons.slice(0, voice ? 2 : 5)) lines.push(`  ${n}× ${why}`);
+        const wonMissed = (t.missedCoins || []).filter((m) => Number(m.traderPct) > 0).slice(0, 3);
+        if (wonMissed.length && !voice) lines.push(`  Skipped coins the trader won on: ${wonMissed.map((m) => `${m.sym || m.mint.slice(0, 4)} ${pct(m.traderPct)}`).join(', ')}`);
+      }
+      if (!lines.length) lines.push(`No trader buys were skipped in ${period}.`);
+      else if (lines.some((l) => /chase/i.test(l))) lines.push('“Price ran past your max chase” means other copiers pushed the price up before we got in — Direct + Fast Trade Detection cut that most.');
+      add(`Skips — ${period}`, lines);
+    },
+    pnl: () => {
+      const line = (k, s) => (s && (s.trades || s.sells) ? `${k}: ${usd(s.realized)} from ${s.trades || s.sells} closed trades (${s.wins || 0} won, ${s.losses || 0} lost)${k === 'Real SOL' && s.realizedSol ? ` = ${s.realizedSol > 0 ? '+' : ''}${s.realizedSol} SOL` : ''}` : `${k}: no closed trades`);
+      add(`Results — ${period}`, [line('Real SOL', r?.data?.real), line('Paper', r?.data?.paper)]);
+    },
+    open: () => {
+      const list = (ctx.openPositions?.() || []).slice(0, voice ? 3 : 10);
+      add('Open positions', list.length ? list.map((p) => `${p.coin} (${p.kind}, ${p.trader}) — cost $${Number(p.costUsd).toFixed(2)}, now $${Number(p.valueUsd).toFixed(2)} ${pct(p.pnlPct)}, held ${p.heldSec != null ? secs(p.heldSec * 1000) : '—'}`) : ['No open positions right now.']);
+    },
+    recent: () => {
+      const closed = (r?.data?.closed || []).slice(-(voice ? 3 : 8)).reverse();
+      add(`Last closed trades — ${period}`, closed.length ? closed.map((c) => `${c.sym} (${c.real ? 'real' : 'paper'}) ${usd(c.pnl)} ${pct(c.pnlPct)} — ${c.cause || 'closed'}, ${ago(c.closedAt)}`) : [`No trades closed in ${period}.`]);
+    },
+    vs: () => {
+      const lines = [];
+      for (const t of r?.data?.traders || []) {
+        for (const v of (t.vs || []).slice(-(voice ? 2 : 6))) {
+          lines.push(`${v.sym}: us ${pct(v.oursPct)} vs ${t.handle} ${pct(v.traderPct)}${v.causes?.length ? ` — we closed on ${v.causes[v.causes.length - 1]}` : ''}`);
+        }
+      }
+      const e = r?.data?.entries;
+      if (e && !voice) {
+        for (const k of ['real', 'paper']) {
+          const x = e[k];
+          if (x?.first?.n || x?.re?.n) lines.push(`${k === 'real' ? 'Real' : 'Paper'}: first entries ${usd(x.first.pnl)} (${x.first.n}), re-entries ${usd(x.re.pnl)} (${x.re.n})`);
+        }
+      }
+      const notes = (r?.findings || []).filter((f) => /trader|chase|late|behind|re-entr|wave/i.test(f.text)).slice(0, voice ? 1 : 3).map((f) => f.text);
+      add(`Us vs the trader — ${period}`, lines.length || notes.length ? [...lines, ...notes] : [`No closed copies in ${period} to compare.`]);
+    },
+    wallet: () => {
+      const w = r?.data?.wallet;
+      add('Bot wallet', w ? [`${w.sol != null ? w.sol.toFixed(4) : '—'} SOL (keeps ${w.reserve ?? '—'} for fees)`, `Limits: ${w.perBuy || 'no'} SOL per buy, ${w.perDay || 'no'} SOL per day — used ${w.spent24h ?? 0} SOL in the last 24 h`, ...(w.buysLeft != null ? [`About ${w.buysLeft} more buys at the usual size`] : [])] : ['The bot wallet is not set up (no ODEX_TRADER_KEY).']);
+    },
+    settings: () => {
+      const s = ctx.settings?.() || {};
+      const lines = [`Mode: ${s.mode || '—'}`, `Swap route: ${ctx.swapRoute === 'direct' ? 'Direct pump.fun' : 'Jupiter'} · Fast Trade Detection: ${ctx.fastDetect?.on ? 'on' : 'off'}`];
+      for (const t of (s.traders || []).slice(0, voice ? 1 : 5)) lines.push(`${t.name} (${t.status}${t.pauseReason ? `: ${t.pauseReason}` : ''}) — max chase ${t.maxChasePct ?? '—'}%, SL ${t.stopLossPct ?? '—'}%, TP ${t.takeProfitPct ?? '—'}%, sells with trader: ${t.sellsWhenTraderSells ? 'yes' : 'no'}, real SOL/day ${t.realSolPerDay ?? 'no limit'}`);
+      add('Settings', lines);
+    },
+    trader: () => {
+      const list = (ctx.traderTrades?.({ hours: 24, limit: voice ? 3 : 10 }) || []);
+      add('Trader trades — last 24 h', list.length ? list.map((e) => `${e.trader} ${e.side} ${e.coin || e.mint.slice(0, 4)} $${Number(e.usd || 0).toFixed(0)}${e.side === 'sell' && e.soldPctOfBag ? ` (${Number(e.soldPctOfBag).toFixed(0)}% of bag)` : ''} — ${e.copies?.some((c) => c.copied) ? 'copied' : e.copies?.[0]?.reason ? `skipped: ${e.copies[0].reason}` : 'not copied'}, ${ago(Date.parse(e.at))}`) : ['No trades from your traders in the last 24 h.']);
+    },
+    report: () => add(`Report — ${period}`, (r?.findings || []).slice(0, voice ? 3 : 8).map((f) => f.text)),
+  };
+
+  const chosen = topics.length ? topics.slice(0, 3) : [];
+  for (const k of chosen) sections[k]?.();
+  if (!parts.length) {
+    // not sure what was asked: a short answer, not the whole report
+    sections.pnl();
+    parts.push(voice ? 'Ask me about delay, skips, open positions, profit, or the last trades.' : 'I’m not sure what you meant — ask me about **delay**, **skips**, **open positions**, **profit**, **last trades**, **us vs the trader**, **wallet** or **settings**.');
+  }
+  return parts.join(voice ? ' ' : '\n\n');
+}
