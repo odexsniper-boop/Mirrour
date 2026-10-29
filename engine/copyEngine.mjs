@@ -767,7 +767,9 @@ export class CopyTradingEngine {
     const paper = Boolean(this.settings.paperTrading);
     const real = !paper && this.adapter.useLive?.({ paper, chainId: follow.chainId });
     if (!paper && !real) {
-      return this.recordSkip({ dryRun, follow, wallet, signal, reason: 'real trading is not set up (add ODEX_TRADER_KEY to .env, or turn Paper Trading on)' });
+      // say WHY real trading is off (the server knows: missing key, missing site password, another copy running, restarting…)
+      const why = (typeof this.realUnavailableReason === 'function' && this.realUnavailableReason()) || 'the bot wallet key ODEX_TRADER_KEY is missing (or turn Paper Trading on)';
+      return this.recordSkip({ dryRun, follow, wallet, signal, reason: `real trading is off — ${why}` });
     }
     const buyAssetMode = follow.chainId === 'arc' ? 'stable' : this.settings.tradingAsset[follow.chainId] || 'stable';
     // Real buys: a trade size above the SOL caps (e.g. $50 with a 0.05 SOL limit) is bought at the

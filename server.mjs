@@ -239,6 +239,14 @@ setInterval(() => {
 engine.adapter.realEnabled = () => realTrader.ready() && !realBlockedReason && !otherInstance && holdsData();
 engine.adapter.realBuyRoomUsd = () => realTrader.buyRoomUsd();
 engine.realTradingActive = () => !engine.settings.paperTrading && engine.adapter.realEnabled();
+// the exact reason real trading is off right now (shown on skipped copies)
+engine.realUnavailableReason = () => {
+  if (!realTrader.ready()) return realTrader.keyError || 'the bot wallet key ODEX_TRADER_KEY is missing';
+  if (realBlockedReason) return 'ODEX_PASSWORD is not set on Railway — add it back in Variables (a public site with the wallet key must have a password)';
+  if (otherInstance) return `another copy of Odex Mirror is running (${otherInstance.host}) — stop it`;
+  if (!holdsData()) return 'Odex is switching to a new version — copies resume in a few seconds';
+  return null;
+};
 
 // Real balance of the bot wallet → the engine's wallet balances (used for sizing and spend checks)
 async function refreshRealBalance() {

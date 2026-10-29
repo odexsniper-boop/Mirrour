@@ -283,7 +283,7 @@ test('Paper OFF without a key: nothing is copied (no fake real trades)', async (
   e.adapter.realEnabled = () => false;
   await e.processTraderSignal(buySig(f));
   assert.equal(e.positions.length, 0);
-  assert.match(e.history[0].reason, /real trading is not set up/);
+  assert.match(e.history[0].reason, /real trading is off — the bot wallet key ODEX_TRADER_KEY is missing/);
 });
 
 test('one real sell per position at a time; a failed exit is retried (initials flag restored)', async () => {
