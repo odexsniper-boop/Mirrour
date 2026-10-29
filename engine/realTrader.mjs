@@ -679,6 +679,58 @@ export class RealTrader {
     }
   }
 
+  /**
+   * The coin is no longer in the bot wallet: find the transaction that took it out (the bot's
+   * token accounts for this mint keep their history even after they are closed) and how much SOL
+   * came back. { held: bigint, sale: { signature, receivedSol, t } | null }
+   */
+  async findTokenExit(mint, { skip = new Set(), since = 0 } = {}) {
+    if (!this.ready()) throw new Error(this.keyError || 'the bot wallet is not set up');
+    const held = await this.getTokenBalanceRaw(mint);
+    if (held > 0n) return { held, sale: null };
+    const atas = [PD.TOKEN_PROGRAM, PD.TOKEN_2022_PROGRAM].map((tp) => PD.ataAddress(this.address, mint, tp));
+    const sigs = [];
+    for (const a of atas) {
+      try {
+        const list = (await this.rpc('getSignaturesForAddress', [a, { limit: 25, commitment: 'confirmed' }])) || [];
+        for (const x of list) if (!x.err) sigs.push(x);
+      } catch {
+        // try the other account
+      }
+    }
+    sigs.sort((a, b) => (b.blockTime || 0) - (a.blockTime || 0));
+    // every exit since the position opened that the bot has not booked yet (an earlier partial
+    // sell such as "Initials" is already booked and must not be counted twice)
+    let receivedSol = 0;
+    const signatures = [];
+    let lastT = 0;
+    const seenSig = new Set();
+    for (const x of sigs.slice(0, 40)) {
+      if (seenSig.has(x.signature) || skip.has(x.signature)) continue;
+      seenSig.add(x.signature);
+      if (since && x.blockTime && x.blockTime * 1000 < since - 60_000) continue;
+      let tx;
+      try {
+        tx = await this.rpc('getTransaction', [x.signature, { encoding: 'jsonParsed', maxSupportedTransactionVersion: 0, commitment: 'confirmed' }]);
+      } catch {
+        continue;
+      }
+      if (!tx?.meta || tx.meta.err) continue;
+      const keys = (tx.transaction?.message?.accountKeys || []).map((k) => (typeof k === 'string' ? k : k.pubkey));
+      const me = keys.indexOf(this.address);
+      if (me < 0) continue;
+      const amt = (list) => (list || []).filter((b) => b.mint === mint && b.owner === this.address).reduce((s2, b) => s2 + BigInt(b.uiTokenAmount?.amount || '0'), 0n);
+      const tokDelta = amt(tx.meta.postTokenBalances) - amt(tx.meta.preTokenBalances);
+      if (tokDelta >= 0n) continue; // not a transaction that took tokens out
+      const solDelta = (Number(tx.meta.postBalances?.[me] || 0) - Number(tx.meta.preBalances?.[me] || 0)) / 1e9;
+      receivedSol += Math.max(0, solDelta);
+      signatures.push(x.signature);
+      lastT = Math.max(lastT, (tx.blockTime || x.blockTime || 0) * 1000);
+    }
+    if (signatures.length) return { held: 0n, sale: { signature: signatures[0], signatures, receivedSol, t: lastT || this.now() } };
+    return { held: 0n, sale: null };
+  }
+
   /** How many raw tokens to sell: never more than the wallet holds. */
   async sellAmountRaw(mint, tokenAmount, decimals, preHeld = null) {
     const held = preHeld !== null ? preHeld : await this.getTokenBalanceRaw(mint);

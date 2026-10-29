@@ -1264,6 +1264,26 @@ export const server = http.createServer(async (req, res) => {
         return sendJson(res, resSell.ok ? 200 : 400, { ...resSell, error: resSell.error ? hideKeys(resSell.error) : resSell.error, state: engine.getStateSnapshot() });
       }
 
+      // Real position whose coins are no longer in the bot wallet: close the record. Checked
+      // on-chain first; the transaction that took the coins out (if found) sets the result.
+      if (req.method === 'POST' && subAction === 'close-record') {
+        const pos = engine.positions.find((p) => p.id === posId);
+        if (!pos || !(pos.remainingTokens > 0)) return sendJson(res, 404, { ok: false, error: 'Position not found or already closed.' });
+        if (pos.isPaper !== false) return sendJson(res, 400, { ok: false, error: 'Only real positions need this — sell paper positions normally.' });
+        let found;
+        try {
+          const booked = new Set((engine.history || []).map((h) => h.txHash).filter(Boolean));
+          found = await realTrader.findTokenExit(pos.tokenAddress, { skip: booked, since: pos.openedAt || 0 });
+        } catch (err) {
+          return sendJson(res, 502, { ok: false, error: `could not read the bot wallet: ${hideKeys(err.message)}` });
+        }
+        if (found.held > 0n) return sendJson(res, 409, { ok: false, error: 'The bot wallet still holds this coin — use Sell instead.' });
+        const px = Number(CHAINS.solana.nativePriceUsd) || 0;
+        const sale = found.sale;
+        const receipt = engine.bookExternalRealSell(pos, sale ? { receivedUsd: sale.receivedSol * px, txHash: sale.signature, at: sale.t, cause: 'sold outside the bot (record fixed)' } : { receivedUsd: 0, txHash: null, at: Date.now(), cause: 'coins gone from the bot wallet (no sale found)' });
+        return sendJson(res, 200, { ok: true, sale: sale ? { signature: sale.signature, signatures: sale.signatures, receivedSol: sale.receivedSol } : null, receipt: receipt ? { pnlUsd: receipt.realizedPnlUsd ?? null } : null, state: engine.getStateSnapshot() });
+      }
+
       if (req.method === 'POST' && subAction === 'limit-orders') {
         const resOrd = engine.armLimitOrder(posId, body);
         return sendJson(res, resOrd.ok ? 200 : 400, { ...resOrd, state: engine.getStateSnapshot() });

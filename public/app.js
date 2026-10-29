@@ -1488,6 +1488,7 @@ function renderPositionsList() {
               <button class="btn btn-sm" onclick="sellPosition('${p.id}', 'initials')" title="Sell enough to recover your cost">Initials</button>
               <button class="btn btn-sm" onclick="sellPosition('${p.id}', 50)">50%</button>
               <button class="btn btn-danger-soft btn-sm" onclick="sellPosition('${p.id}', 100)">100%</button>
+              ${p.isPaper === false && (p.realTokensMissing || p.realMissingChecks > 0) ? `<button class="btn btn-sm" onclick="closePositionRecord('${p.id}')" title="The coins are no longer in the bot wallet: check on-chain and close this record with the real result">Close record</button>` : ''}
             </div>
 
             <div class="armed-order-group">
@@ -2003,7 +2004,7 @@ window.sellPosition = async function sellPosition(posId, modeOrPct) {
     } catch {
       data = { ok: false, error: `the server answered ${res.status} — it may be restarting, try again in a moment` };
     }
-    if (!data.ok) showToast(`Sell failed: ${data.error || 'refused'}`, 'danger');
+    if (!data.ok) showToast(`Sell failed: ${data.error || 'refused'}${/holds none of this token/i.test(data.error || '') ? ' — press “Close record” to fix the record' : ''}`, 'danger');
     else showToast(`Sold ${what} of $${pos?.symbol || ''}`, 'good');
     if (data.state) {
       engineState = data.state;
@@ -2013,6 +2014,25 @@ window.sellPosition = async function sellPosition(posId, modeOrPct) {
     showToast('Sell failed: could not reach the Odex server (it may be restarting after an update) — try again in a moment', 'danger');
   } finally {
     window.__sellsInFlight.delete(posId);
+  }
+};
+
+window.closePositionRecord = async function closePositionRecord(posId) {
+  const pos = engineState?.positions?.find((p) => p.id === posId);
+  const ok = await confirmAction({ title: `Close the $${pos?.symbol || ''} record?`, message: 'Odex checks on-chain that the bot wallet no longer holds this coin, finds the transaction that took it out, and books what you really got back. Nothing is sold or sent.', confirmLabel: 'Check & close' });
+  if (!ok) return;
+  showToast('Checking the bot wallet on-chain…', 'good');
+  try {
+    const res = await fetch(`/api/positions/${posId}/close-record`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    const data = await res.json().catch(() => ({ ok: false, error: `server answered ${res.status}` }));
+    if (!data.ok) showToast(`Not closed: ${data.error || 'refused'}`, 'danger');
+    else showToast(data.sale ? `Closed: the coins left in ${data.sale.signatures?.length || 1} transaction(s) for ${Number(data.sale.receivedSol).toFixed(4)} SOL — booked.` : 'Closed: no sale found on-chain, booked at $0.', 'good');
+    if (data.state) {
+      engineState = data.state;
+      renderTerminalAll();
+    }
+  } catch {
+    showToast('Could not reach the Odex server — try again in a moment', 'danger');
   }
 };
 
