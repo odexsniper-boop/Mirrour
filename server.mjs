@@ -1280,8 +1280,21 @@ export const server = http.createServer(async (req, res) => {
         if (found.held > 0n) return sendJson(res, 409, { ok: false, error: 'The bot wallet still holds this coin — use Sell instead.' });
         const px = Number(CHAINS.solana.nativePriceUsd) || 0;
         const sale = found.sale;
-        const receipt = engine.bookExternalRealSell(pos, sale ? { receivedUsd: sale.receivedSol * px, txHash: sale.signature, at: sale.t, cause: 'sold outside the bot (record fixed)' } : { receivedUsd: 0, txHash: null, at: Date.now(), cause: 'coins gone from the bot wallet (no sale found)' });
-        return sendJson(res, 200, { ok: true, sale: sale ? { signature: sale.signature, signatures: sale.signatures, receivedSol: sale.receivedSol } : null, receipt: receipt ? { pnlUsd: receipt.realizedPnlUsd ?? null } : null, state: engine.getStateSnapshot() });
+        // The coin's real result is what its on-chain transactions moved: every buy, sell and rent
+        // refund. Close so this position's total profit equals that (this also undoes a buy that was
+        // booked but never happened on-chain).
+        let receivedUsd;
+        let cause;
+        if (found.onchain && px > 0) {
+          const target = found.onchain.netSol * px;
+          receivedUsd = Math.max(0, target - (Number(pos.realizedPnlUsd) || 0) + (Number(pos.remainingCostUsd) || 0));
+          cause = 'record fixed to the on-chain result';
+        } else {
+          receivedUsd = sale ? sale.receivedSol * px : 0;
+          cause = sale ? 'sold outside the bot (record fixed)' : 'coins gone from the bot wallet (no sale found)';
+        }
+        const receipt = engine.bookExternalRealSell(pos, { receivedUsd, txHash: sale?.signature || null, at: sale?.t || Date.now(), cause });
+        return sendJson(res, 200, { ok: true, onchain: found.onchain || null, totalPnlUsd: Number(pos.realizedPnlUsd) || 0, sale: sale ? { signature: sale.signature, signatures: sale.signatures, receivedSol: sale.receivedSol } : null, receipt: receipt ? { pnlUsd: receipt.realizedPnlUsd ?? null } : null, state: engine.getStateSnapshot() });
       }
 
       if (req.method === 'POST' && subAction === 'limit-orders') {

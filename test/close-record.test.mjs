@@ -53,6 +53,9 @@ test('CR2 coins gone: the unbooked sale is found; the booked "Initials" sell and
   assert.equal(r.held, 0n);
   assert.deepEqual(r.sale.signatures, ['sellFinal']);
   assert.ok(Math.abs(r.sale.receivedSol - 0.11) < 1e-9, `got ${r.sale.receivedSol}`);
+  // the coin's full on-chain result: −0.2 buy +0.1 initials +0.11 final = +0.01 SOL (booked or not)
+  assert.equal(r.onchain.txCount, 3);
+  assert.ok(Math.abs(r.onchain.netSol - 0.01) < 1e-9, `net ${r.onchain.netSol}`);
   // nothing booked yet → both sells count
   const all = await trader.findTokenExit(MINT, { since: (now - 700) * 1000 });
   assert.deepEqual(all.sale.signatures, ['sellFinal', 'sellInitials']);

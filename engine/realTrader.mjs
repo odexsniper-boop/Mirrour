@@ -711,11 +711,13 @@ export class RealTrader {
     // every exit since the position opened that the bot has not booked yet (an earlier partial
     // sell such as "Initials" is already booked and must not be counted twice)
     let receivedSol = 0;
+    let netSol = 0;
+    let txCount = 0;
     const signatures = [];
     let lastT = 0;
     const seenSig = new Set();
     for (const x of sigs.slice(0, 40)) {
-      if (seenSig.has(x.signature) || skip.has(x.signature)) continue;
+      if (seenSig.has(x.signature)) continue;
       seenSig.add(x.signature);
       if (since && x.blockTime && x.blockTime * 1000 < since - 60_000) continue;
       let tx;
@@ -730,13 +732,20 @@ export class RealTrader {
       if (me < 0) continue;
       const amt = (list) => (list || []).filter((b) => b.mint === mint && b.owner === this.address).reduce((s2, b) => s2 + BigInt(b.uiTokenAmount?.amount || '0'), 0n);
       const tokDelta = amt(tx.meta.postTokenBalances) - amt(tx.meta.preTokenBalances);
-      if (tokDelta >= 0n) continue; // not a transaction that took tokens out
       const solDelta = (Number(tx.meta.postBalances?.[me] || 0) - Number(tx.meta.preBalances?.[me] || 0)) / 1e9;
+      // the coin's whole on-chain result: every buy, sell and rent refund of this coin's account
+      netSol += solDelta;
+      txCount += 1;
+      if (tokDelta < 0n && !skip.has(x.signature)) {
+        // a transaction that took tokens out and that the bot has not booked yet
+      } else continue;
       receivedSol += Math.max(0, solDelta);
       signatures.push(x.signature);
       lastT = Math.max(lastT, (tx.blockTime || x.blockTime || 0) * 1000);
     }
-    if (signatures.length) return { held: 0n, sale: { signature: signatures[0], signatures, receivedSol, t: lastT || this.now() } };
+    const onchain = txCount ? { netSol, txCount } : null;
+    if (signatures.length) return { held: 0n, onchain, sale: { signature: signatures[0], signatures, receivedSol, t: lastT || this.now() } };
+    return { held: 0n, onchain, sale: null };
     return { held: 0n, sale: null };
   }
 

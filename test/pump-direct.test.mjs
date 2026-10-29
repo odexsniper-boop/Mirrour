@@ -321,6 +321,8 @@ test('PD13 two same-size Direct buys at the same moment are two different transa
 
 test('PD14 the same signed transaction is never sent or booked twice', async () => {
   const { trader, w, token } = world();
+  const realRandom = Math.random;
+  Math.random = () => 0; // same fee recipient both times, so only the guard can tell them apart
   const q = await trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 10 });
   trader.directNonce = 0;
   const first = await trader.executeDirect({ side: 'buy', token, quote: q, slippagePct: 10 });
@@ -329,6 +331,7 @@ test('PD14 the same signed transaction is never sent or booked twice', async () 
   const q2 = await trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 10 });
   const again = await trader.executeDirect({ side: 'buy', token, quote: q2, slippagePct: 10 });
   assert.equal(again.ok, undefined);
+  Math.random = realRandom;
   assert.match(again.error, /already sent/);
   assert.equal(w.sent.length, 1);
 });
