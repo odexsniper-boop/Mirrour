@@ -1354,6 +1354,38 @@
   </div>
 
   <!-- MODAL 4: EXCHANGE (Convert / Deposit / Buy) -->
+  <!-- MODAL: SEND SOL FROM THE BOT WALLET -->
+  <div id="modal-bot-send" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="bs-title">
+    <div class="modal-box bs-box">
+      <div class="card-header">
+        <h3 class="card-title" id="bs-title">Send SOL from the Bot Wallet</h3>
+        <button class="btn-icon" onclick="closeModal('modal-bot-send')" aria-label="Close"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <p class="modal-lead" id="bs-balance"></p>
+      <div class="field">
+        <label for="bs-to">To wallet address</label>
+        <input id="bs-to" class="input mono" placeholder="Solana wallet address (e.g. your Phantom)" autocomplete="off" spellcheck="false" oninput="botSendInputChanged()" />
+      </div>
+      <div class="field">
+        <label for="bs-amount">Amount (SOL)</label>
+        <div class="bs-amount-row">
+          <input id="bs-amount" class="input mono" type="number" min="0" step="0.001" placeholder="0.10" oninput="botSendInputChanged()" />
+          <label class="bs-max"><input type="checkbox" id="bs-max" onchange="botSendInputChanged()" /> Max</label>
+        </div>
+      </div>
+      <div class="field">
+        <label for="bs-pass" id="bs-pass-label">Site password</label>
+        <input id="bs-pass" class="input" type="password" autocomplete="current-password" oninput="botSendInputChanged()" />
+      </div>
+      <div id="bs-status" class="bs-status" aria-live="polite"></div>
+      <p class="modal-note">The transfer is tested on the network first, and you confirm it before anything is sent. A Solana transfer can’t be undone.</p>
+      <div class="modal-footer">
+        <button class="btn" onclick="closeModal('modal-bot-send')">Cancel</button>
+        <button class="btn btn-primary" id="bs-go" onclick="submitBotSend()">Review</button>
+      </div>
+    </div>
+  </div>
+
   <div id="modal-deposit" class="modal-backdrop" role="dialog" aria-modal="true" aria-labelledby="exch-title">
     <div class="modal-box exch-box">
       <div class="exch-head">

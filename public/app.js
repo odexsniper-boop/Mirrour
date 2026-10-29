@@ -1785,6 +1785,7 @@ function renderBotWalletCard(fromLoad = false) {
   const caps = s.caps || {};
   const spent = Number(s.spent24hSol || 0);
   const lowFunds = b && b.sol < Number(caps.reserveSol || 0.02) + 0.05;
+  window.__botWallet = s;
   el.innerHTML = `
     <div class="sol-wallet bot-wallet">
       <div class="sw-top">
@@ -1812,6 +1813,7 @@ function renderBotWalletCard(fromLoad = false) {
         </div>
         <div class="sw-actions">
           ${s.configured ? `<button class="btn" id="bw-rent-btn" onclick="reclaimRentNow()" title="Close the bot wallet's empty token accounts and get their rent back (≈0.002 SOL per coin traded)">Reclaim rent</button>` : ''}
+          ${s.configured ? `<button class="btn" onclick="openBotSendModal()" title="Send SOL from the bot wallet to another wallet">Send</button>` : ''}
           ${addr ? `<button class="btn" onclick="openDepositModal('deposit')" title="Send SOL to the bot wallet from Phantom or MetaMask">Fund</button>
           <a class="btn" href="https://solscan.io/account/${encodeURIComponent(addr)}" target="_blank" rel="noopener">Explorer</a>
           <button class="btn btn-primary" id="bw-test-btn" onclick="botWalletSelfTest()" title="Checks the key and simulates a tiny swap — nothing is sent">Self-test</button>` : ''}
@@ -1819,6 +1821,91 @@ function renderBotWalletCard(fromLoad = false) {
       </div>
     </div>`;
 }
+
+// ---------- Bot Wallet → Send ----------
+const botSend = { reviewed: null };
+window.openBotSendModal = function openBotSendModal() {
+  const s = window.__botWallet || {};
+  const m = document.getElementById('modal-bot-send');
+  if (!m) return;
+  botSend.reviewed = null;
+  document.getElementById('bs-to').value = '';
+  document.getElementById('bs-amount').value = '';
+  document.getElementById('bs-max').checked = false;
+  document.getElementById('bs-amount').disabled = false;
+  const pw = document.getElementById('bs-pass');
+  pw.value = '';
+  document.getElementById('bs-pass-label').textContent = s.sendNeedsPassword ? 'Site password (asked for every send)' : 'Type SEND to confirm';
+  pw.type = s.sendNeedsPassword ? 'password' : 'text';
+  pw.placeholder = s.sendNeedsPassword ? 'Your Odex site password' : 'SEND';
+  const bal = s.balance ? `${Number(s.balance.sol).toFixed(4)} SOL in the bot wallet` : 'Balance not read yet';
+  document.getElementById('bs-balance').textContent = bal;
+  botSendStatus('', '');
+  const go = document.getElementById('bs-go');
+  go.textContent = 'Review';
+  go.disabled = false;
+  m.classList.add('open');
+  setTimeout(() => document.getElementById('bs-to').focus(), 50);
+};
+function botSendStatus(html, kind) {
+  const el = document.getElementById('bs-status');
+  el.className = `bs-status ${kind || ''}`;
+  el.innerHTML = html;
+}
+window.botSendInputChanged = function botSendInputChanged() {
+  // any change after a review needs a new review
+  if (botSend.reviewed) {
+    botSend.reviewed = null;
+    document.getElementById('bs-go').textContent = 'Review';
+    botSendStatus('', '');
+  }
+  document.getElementById('bs-amount').disabled = document.getElementById('bs-max').checked;
+};
+window.submitBotSend = async function submitBotSend() {
+  const to = document.getElementById('bs-to').value.trim();
+  const max = document.getElementById('bs-max').checked;
+  const amountSol = Number(document.getElementById('bs-amount').value);
+  const pass = document.getElementById('bs-pass').value;
+  const s = window.__botWallet || {};
+  if (!to) return botSendStatus('Paste the wallet address to send to.', 'bad');
+  if (!max && !(amountSol > 0)) return botSendStatus('Enter an amount, or tick Max.', 'bad');
+  if (!pass) return botSendStatus(s.sendNeedsPassword ? 'Enter your site password.' : 'Type SEND to confirm.', 'bad');
+  const go = document.getElementById('bs-go');
+  const body = { to, max, amountSol: max ? undefined : amountSol, password: pass, confirm: pass };
+  go.disabled = true;
+  try {
+    if (!botSend.reviewed) {
+      // step 1: test run on the network — nothing is sent
+      botSendStatus('Checking the address and testing the transfer…', '');
+      const r = await (await fetch('/api/real/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...body, dryRun: true }) })).json();
+      if (!r.ok) return botSendStatus(esc(r.error || 'could not check the transfer'), 'bad');
+      botSend.reviewed = { to, max, amountSol };
+      botSendStatus(`You are sending <strong>${Number(r.sentSol).toFixed(6)} SOL</strong> to <span class="mono">${esc(to.slice(0, 6))}…${esc(to.slice(-6))}</span>. Network fee ≈ ${Number(r.feeSol || 0.000005).toFixed(6)} SOL.${r.keptReserve ? ' Some SOL stays to sell your open real positions.' : ''}<br>Check the address — a transfer can’t be undone.`, 'warn');
+      go.textContent = 'Confirm send';
+      return;
+    }
+    botSendStatus('Sending…', '');
+    const r = await (await fetch('/api/real/send', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })).json();
+    if (r.ok) {
+      botSendStatus(`Sent ${Number(r.sentSol).toFixed(6)} SOL. <a href="https://solscan.io/tx/${encodeURIComponent(r.signature)}" target="_blank" rel="noopener">View on Solscan ↗</a>`, 'good');
+      showToast(`Sent ${Number(r.sentSol).toFixed(4)} SOL from the bot wallet`, 'good');
+      go.textContent = 'Done';
+      go.onclick = () => {
+        go.onclick = submitBotSend;
+        closeModal('modal-bot-send');
+      };
+      loadBotCardStatus(true);
+    } else {
+      botSend.reviewed = null;
+      go.textContent = 'Review';
+      botSendStatus(`${esc(r.error || 'send failed')}${r.signature ? ` <a href="https://solscan.io/tx/${encodeURIComponent(r.signature)}" target="_blank" rel="noopener">Solscan ↗</a>` : ''}`, 'bad');
+    }
+  } catch (err) {
+    botSendStatus(`Could not reach the server: ${esc(err.message)}`, 'bad');
+  } finally {
+    go.disabled = false;
+  }
+};
 
 window.botWalletSelfTest = async function botWalletSelfTest() {
   const btn = document.getElementById('bw-test-btn');

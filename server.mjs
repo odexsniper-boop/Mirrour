@@ -136,6 +136,7 @@ export const notifier = new Notifier({ engine, redact: (x) => redact(String(x), 
 engine.onUpdate((evt) => notifier.handleEngineEvent(evt));
 setInterval(() => notifier.scanAlerts(), 4000).unref?.();
 // On a public deploy, real trading needs a site password (otherwise anyone with the link could trade)
+const sendLog = []; // Bot Wallet → Send attempts (rate limit)
 const realBlockedReason = ON_RAILWAY && !SITE_PASSWORD ? 'public deploy without ODEX_PASSWORD: real trading is disabled' : null;
 const startedAt = Date.now();
 let shuttingDownFlag = false;
@@ -896,7 +897,7 @@ export const server = http.createServer(async (req, res) => {
     // Real trading: status (never includes the key) and a safe self-test that sends nothing
     if (req.method === 'GET' && pathname === '/api/real/status') {
       if (engine.realTradingActive()) await refreshRealBalance();
-      return sendJson(res, 200, { ok: true, active: engine.realTradingActive(), paperTrading: engine.settings.paperTrading, solPriceLive, blocked: realBlockedReason || (otherInstance ? `another copy of Odex Mirror is running (${otherInstance.host}) — stop it to trade here` : null), onRailway: ON_RAILWAY, ...realTrader.status() });
+      return sendJson(res, 200, { ok: true, active: engine.realTradingActive(), paperTrading: engine.settings.paperTrading, solPriceLive, blocked: realBlockedReason || (otherInstance ? `another copy of Odex Mirror is running (${otherInstance.host}) — stop it to trade here` : null), onRailway: ON_RAILWAY, sendNeedsPassword: Boolean(SITE_PASSWORD), ...realTrader.status() });
     }
     // Real-trading SOL limits from the dashboard (empty = use the Railway / .env variable)
     if (req.method === 'POST' && pathname === '/api/real/caps') {
@@ -979,6 +980,34 @@ export const server = http.createServer(async (req, res) => {
       const body = await readJsonBody(req);
       const r = await runRentReclaim({ dryRun: Boolean(body.dryRun), why: 'by hand' });
       return sendJson(res, r.ok ? 200 : 400, { ...r, error: r.error ? redact(r.error, alchemy.apiKey) : undefined, errors: (r.errors || []).map((e) => redact(e, alchemy.apiKey)), balance: realTrader.balance || null });
+    }
+    // Bot Wallet → Send: SOL to another wallet. The site password is asked again for every send
+    // (an open browser tab alone can't empty the wallet); without a site password, typing SEND.
+    if (req.method === 'POST' && pathname === '/api/real/send') {
+      const body = await readJsonBody(req);
+      if (realBlockedReason) return sendJson(res, 403, { ok: false, error: realBlockedReason });
+      if (otherInstance) return sendJson(res, 409, { ok: false, error: `another copy of Odex Mirror is running (${otherInstance.host}) — send from there or stop it` });
+      const hourAgo = Date.now() - 3600_000;
+      while (sendLog.length && sendLog[0].t < hourAgo) sendLog.shift();
+      if (sendLog.filter((x) => x.bad).length >= 5) return sendJson(res, 429, { ok: false, error: 'too many wrong passwords — sending is locked for an hour' });
+      if (SITE_PASSWORD) {
+        const given = Buffer.from(String(body.password || ''));
+        const want = Buffer.from(SITE_PASSWORD);
+        if (!(given.length === want.length && timingSafeEqual(given, want))) {
+          sendLog.push({ t: Date.now(), bad: true });
+          return sendJson(res, 403, { ok: false, error: 'wrong site password — nothing was sent' });
+        }
+      } else if (String(body.confirm || '').trim().toUpperCase() !== 'SEND') {
+        return sendJson(res, 400, { ok: false, error: 'type SEND to confirm' });
+      }
+      if (!body.dryRun && sendLog.filter((x) => !x.bad).length >= 10) return sendJson(res, 429, { ok: false, error: 'at most 10 sends an hour' });
+      const openReal = engine.positions.some((p) => p.isPaper === false && p.remainingTokens > 0);
+      const r = await realTrader.sendSol({ to: body.to, amountSol: body.max ? 'max' : body.amountSol, keepReserve: openReal, dryRun: Boolean(body.dryRun) });
+      if (!body.dryRun && (r.ok || r.unknown)) {
+        sendLog.push({ t: Date.now() });
+        console.log(`Bot wallet send: ${r.sentSol ?? '?'} SOL → ${String(body.to).slice(0, 6)}… ${r.ok ? 'confirmed' : 'unconfirmed'} ${r.signature || ''}`);
+      }
+      return sendJson(res, r.ok ? 200 : 400, { ...r, error: r.error ? redact(r.error, alchemy.apiKey) : undefined, keptReserve: openReal });
     }
     if (req.method === 'POST' && pathname === '/api/real/test') {
       const r = await realTrader.selfTest();

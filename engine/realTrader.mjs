@@ -11,7 +11,7 @@
  *   - a swap whose result is unknown (timeout) is looked up on-chain before anything is recorded
  */
 import crypto from 'node:crypto';
-import { base58Decode, base58Encode } from './onchainMeta.mjs';
+import { base58Decode, base58Encode, isOnCurve } from './onchainMeta.mjs';
 import { reclaimRent as reclaimRentRun } from './rentReclaim.mjs';
 import * as PD from './pumpDirect.mjs';
 const PRICE_CODES = PD.PRICE_ERRORS;
@@ -591,6 +591,92 @@ export class RealTrader {
     // exact amounts from the simulation as a fallback; readFill prefers the real transaction
     const exec = side === 'buy' ? { totalInputAmount: String(inAmount), totalOutputAmount: String(outAmount) } : { totalInputAmount: String(inAmount), totalOutputAmount: String(outAmount) };
     return { ok: true, signature: sig, exec, inAmount: String(inAmount), sendMs };
+  }
+
+  /**
+   * Send SOL from the bot wallet to another wallet (Bot Wallet → Send).
+   * amountSol: a number, or 'max' (everything that can go). keepReserve: keep the fee reserve
+   * (real positions are open and need fees to sell). Checks the recipient, simulates the exact
+   * transfer, then sends it. Returns { ok, signature, sentSol, feeSol, balance } or { ok:false, error }.
+   */
+  async sendSol({ to, amountSol, keepReserve = true, dryRun = false } = {}) {
+    if (!this.ready()) return { ok: false, error: this.keyError || 'the bot wallet is not set up' };
+    if (this.sendInFlight) return { ok: false, error: 'a send is already in progress' };
+    const dest = String(to || '').trim();
+    let destBytes;
+    try {
+      destBytes = base58Decode(dest);
+    } catch {
+      destBytes = null;
+    }
+    if (!destBytes || destBytes.length !== 32 || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(dest)) return { ok: false, error: 'that is not a valid Solana address' };
+    if (dest === this.address) return { ok: false, error: 'that is the bot wallet itself' };
+    if (!isOnCurve(Buffer.from(destBytes))) return { ok: false, error: 'that address is not a normal wallet (it belongs to a program) — SOL sent there could be lost' };
+    this.sendInFlight = true;
+    try {
+      const FEE = 5_000n + 100n; // base fee + a tiny priority fee (1,000 units × 100,000 µlamports)
+      const [balR, destR] = await Promise.all([
+        this.rpc('getBalance', [this.address, { commitment: 'confirmed' }]),
+        this.rpc('getAccountInfo', [dest, { encoding: 'base64', commitment: 'confirmed' }]),
+      ]);
+      const have = BigInt(Number(balR?.value ?? balR ?? 0));
+      const destAcc = destR?.value || null;
+      if (destAcc && destAcc.owner !== PD.SYSTEM_PROGRAM) return { ok: false, error: 'that address is a token account or program, not a wallet — use the wallet address itself' };
+      if (destAcc?.executable) return { ok: false, error: 'that address is a program, not a wallet' };
+      // SOL promised to buys in progress and (with open real positions) the fee reserve stay
+      const pending = BigInt(Math.ceil((this.pendingBuySol || 0) * 1e9));
+      const reserve = keepReserve ? BigInt(Math.ceil((this.caps.reserveSol || 0) * 1e9)) : 0n;
+      const usable = have - FEE - pending - reserve;
+      let lamports;
+      if (amountSol === 'max') lamports = usable;
+      else {
+        const n = Number(amountSol);
+        if (!Number.isFinite(n) || n <= 0) return { ok: false, error: 'enter an amount above 0' };
+        lamports = BigInt(Math.round(n * 1e9));
+      }
+      if (lamports <= 0n) return { ok: false, error: `nothing to send: the wallet has ${(Number(have) / 1e9).toFixed(4)} SOL${reserve ? `, ${(Number(reserve) / 1e9).toFixed(3)} SOL is kept for selling the open positions` : ''}` };
+      if (lamports > usable) {
+        return { ok: false, error: `not enough SOL: ${(Number(usable > 0n ? usable : 0n) / 1e9).toFixed(6)} SOL can be sent${reserve ? ` (${(Number(reserve) / 1e9).toFixed(3)} SOL is kept for selling the open positions)` : ''}${pending ? ' (some SOL is reserved for buys in progress)' : ''}` };
+      }
+      if (!destAcc && lamports < 890_880n) return { ok: false, error: 'a new (empty) wallet needs at least 0.00089 SOL, or Solana rejects the transfer' };
+      // what stays behind must not be stranded below the network's minimum either
+      const left = have - lamports - FEE;
+      if (left > 0n && left < 890_880n) return { ok: false, error: `that would leave ${(Number(left) / 1e9).toFixed(6)} SOL, below Solana's 0.00089 SOL minimum — send a little less, or press Max` };
+      const ix = { programId: PD.SYSTEM_PROGRAM, keys: [{ pubkey: this.address, isSigner: true, isWritable: true }, { pubkey: dest, isSigner: false, isWritable: true }], data: Buffer.concat([Buffer.from([2, 0, 0, 0]), (() => { const b = Buffer.alloc(8); b.writeBigUInt64LE(lamports); return b; })()]) };
+      const blockhash = await this.recentBlockhash();
+      const { message } = PD.compileMessage({ payer: this.address, instructions: [...PD.computeBudgetIxs({ units: 1_000, microLamports: 100_000 }), ix], recentBlockhash: blockhash });
+      const signed = PD.signLegacy(message, this.keypair);
+      // ----- simulate: exactly `lamports` leaves, exactly `lamports` arrives -----
+      const sim = await this.rpc('simulateTransaction', [signed.base64, { encoding: 'base64', commitment: 'confirmed', sigVerify: true, replaceRecentBlockhash: false, accounts: { encoding: 'base64', addresses: [this.address, dest] } }]);
+      if (sim?.value?.err) return { ok: false, error: `the network rejected the transfer in a test run: ${JSON.stringify(sim.value.err).slice(0, 160)}` };
+      const post = sim?.value?.accounts || [];
+      const fromAfter = post[0] ? BigInt(post[0].lamports || 0) : null;
+      const toAfter = post[1] ? BigInt(post[1].lamports || 0) : null;
+      const toBefore = BigInt(destAcc?.lamports || 0);
+      if (fromAfter === null || toAfter === null) return { ok: false, error: 'the test run returned no balances — nothing was sent' };
+      if (toAfter - toBefore !== lamports || have - fromAfter > lamports + 20_000n) return { ok: false, error: 'the test run did not move exactly the amount asked — nothing was sent' };
+      const sentSol = Number(lamports) / 1e9;
+      if (dryRun) return { ok: true, dryRun: true, sentSol, feeSol: Number(have - fromAfter - lamports) / 1e9, to: dest };
+      // ----- send + confirm -----
+      let sig = signed.signature;
+      try {
+        const r = await this.rpc('sendTransaction', [signed.base64, { encoding: 'base64', skipPreflight: true, maxRetries: 5 }]);
+        if (typeof r === 'string') sig = r;
+      } catch {
+        // the status check decides
+      }
+      this.blastSignedTransaction(signed.base64);
+      const st = await this.waitForSignature(sig, 30_000);
+      this.record({ side: 'transfer', mint: null, symbol: 'SOL', signature: sig, ok: st === 'success' ? true : st === 'failed' ? false : null, route: 'transfer', to: dest, sol: sentSol, error: st === 'success' ? null : st === 'failed' ? 'transfer failed on-chain' : 'not confirmed in 30 s' });
+      const balance = await this.refreshBalance().catch(() => this.balance);
+      if (st === 'failed') return { ok: false, signature: sig, error: 'the transfer failed on-chain (only the network fee was taken)' };
+      if (st !== 'success') return { ok: false, unknown: true, signature: sig, error: `sent but not confirmed in 30 s — check Solscan before sending again: ${sig}` };
+      return { ok: true, signature: sig, sentSol, feeSol: Number(FEE) / 1e9, to: dest, balance };
+    } catch (err) {
+      return { ok: false, error: `could not send: ${err.message}` };
+    } finally {
+      this.sendInFlight = false;
+    }
   }
 
   /** How many raw tokens to sell: never more than the wallet holds. */
