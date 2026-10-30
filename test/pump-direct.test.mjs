@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import * as PD from '../engine/pumpDirect.mjs';
 import { RealTrader } from '../engine/realTrader.mjs';
+import { CopyTradingEngine } from '../engine/copyEngine.mjs';
 import { base58Encode, base58Decode } from '../engine/onchainMeta.mjs';
 
 const SOL_PX = 200;
@@ -375,4 +376,61 @@ test('PD17 direct buy reads curve, mint, user SOL, and both token accounts in on
   assert.equal(preSendCalls.filter((m) => m === 'getMultipleAccounts').length, 1, `single 5-account read before send: ${preSendCalls.join(', ')}`);
   assert.equal(preSendCalls.filter((m) => m === 'getBalance').length, 0, `no redundant getBalance before send: ${preSendCalls.join(', ')}`);
 });
+
+test('PD18 direct buy near maxChasePct ceiling tightens slippage locally without a second getSwapQuote RPC read', async () => {
+  const { trader, token, mint } = world();
+  const calls = [];
+  const origRpc = trader.rpc;
+  trader.rpc = async (method, params) => {
+    calls.push(method);
+    return origRpc(method, params);
+  };
+  const e = new CopyTradingEngine();
+  e.settings.paperTrading = false;
+  e.settings.tradingAsset.solana = 'native';
+  e.settings.buySlippagePct.solana = 15;
+  e.wallets[0].balances.solana.native = 5;
+  e.adapter.liveHooks = trader.hooks();
+  e.adapter.realEnabled = () => trader.ready();
+  const f = {
+    id: 'fol-direct',
+    walletId: e.getActiveWallet().id,
+    name: 'Decu',
+    handle: 'Decu',
+    traderWallet: '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9',
+    chainId: 'solana',
+    status: 'copying',
+    pauseReason: null,
+    mode: 'buy-hold',
+    sizing: { type: 'fixed', amount: 10 },
+    tpPct: null,
+    slPct: null,
+    minTradeUsd: 1,
+    maxOpenPositions: 100,
+    maxAtRiskUsd: 100000,
+    consecutiveLosses: 0,
+    maxChasePct: 20,
+    filtersOverride: {},
+    createdAt: Date.now(),
+  };
+  e.follows.unshift(f);
+  // Direct quote for $10 on default curve is ~$0.000005668/token; set traderFillPriceUsd so quote is ~+13% above trader (room ~5.8% < 15% slippage)
+  const q0 = await trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 15 });
+  calls.length = 0;
+  const traderPx = q0.quotedPriceUsd / 1.13;
+  const [res] = await e.processTraderSignal({
+    chainId: 'solana',
+    side: 'buy',
+    traderHandle: f.handle,
+    traderWallet: f.traderWallet,
+    signature: 'sig-direct-near-ceiling',
+    ageSec: 1,
+    traderBuyUsd: 200,
+    token: { ...token, address: mint, traderFillPriceUsd: traderPx, currentPriceUsd: traderPx },
+  });
+  assert.equal(res.status, 'filled', res.reason);
+  const preSendCalls = calls.slice(0, calls.indexOf('sendTransaction'));
+  assert.equal(preSendCalls.filter((m) => m === 'getMultipleAccounts').length, 1, `no second directQuote RPC call when tightening slippage: ${preSendCalls.join(', ')}`);
+});
+
 

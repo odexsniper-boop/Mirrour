@@ -915,7 +915,7 @@ export class RealTrader {
     let timing = null;
     let directNote = null;
     if (tooLate()) return release(this.fail(lateError(), { late: true }));
-    if (quote?._direct && quote._side === side && quote._slippagePct === slippagePct && this.now() - quote.timestamp < 6000) {
+    if (quote?._direct && quote._side === side && this.now() - quote.timestamp < 6000) {
       const dr = await this.executeDirect({ side, token, quote, slippagePct, tooLate });
       if (dr.ok) {
         exec = dr.exec;

@@ -912,7 +912,7 @@ export class CopyTradingEngine {
       };
       let room = roomFor(quote);
       if (!(room >= 0.5)) return tooHigh(chaseGapPct);
-      if (room < buySlippagePct && !dryRun) {
+      if (room < buySlippagePct && !dryRun && quote?.route !== 'direct') {
         buySlippagePct = Math.max(0.5, Math.floor(room * 10) / 10);
         try {
           quote = await this.adapter.getSwapQuote({ chainId: follow.chainId, side: 'buy', token: quoteToken, amountUsd: desiredUsd, slippagePct: buySlippagePct, paper, assetMode: buyAssetMode });
@@ -923,7 +923,10 @@ export class CopyTradingEngine {
         const gap2 = ((Number(quote.quotedPriceUsd) - Number(token.traderFillPriceUsd)) / Number(token.traderFillPriceUsd)) * 100;
         // the price kept running while we re-quoted: the new quote + its slippage must still fit
         if (!(room >= buySlippagePct - 0.05)) return tooHigh(gap2);
-      } else if (room < buySlippagePct) buySlippagePct = Math.max(0.5, Math.floor(room * 10) / 10);
+      } else if (room < buySlippagePct) {
+        buySlippagePct = Math.max(0.5, Math.floor(room * 10) / 10);
+        if (quote && quote.route === 'direct') quote._slippagePct = buySlippagePct;
+      }
     }
 
     if (dryRun) {

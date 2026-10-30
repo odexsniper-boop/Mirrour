@@ -34,14 +34,16 @@ export function restoreEngine(engine, data) {
   if (Array.isArray(data.follows)) {
     engine.follows = data.follows;
     for (const f of engine.follows) {
-      if ((f.id === 'fol-03782071' || f.traderWallet === '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9') && !f.decuV2Migrated) {
+      if ((f.id === 'fol-03782071' || f.traderWallet === '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9') && !f.decuV3Migrated) {
         f.mode = 'auto-exit';
         f.mirrorSells = true;
         f.exitRules = followTraderExitRules();
         f.copyTopUps = false;
         f.reentryCooldownMin = 10;
+        f.maxChasePct = 45;
         f.filtersOverride = { ...(f.filtersOverride || {}), minTraderBuyNative: 0.5 };
         f.decuV2Migrated = true;
+        f.decuV3Migrated = true;
       }
     }
   }
