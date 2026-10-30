@@ -6923,3 +6923,11 @@ body.logged-out .dax-fab,body.logged-out .dax-chat{display:none!important}
 .cfg-signout:hover .cfg-nav-txt strong{color:#f87171}
 body.logged-out .cfg-signout{display:none}
 @media (max-width:900px){.cfg-side{position:static}.cfg-signout .cfg-nav-txt small{display:none}}
+
+/* live SOL price, left of the status bar */
+.sb-solpx{margin-right:auto;color:#22c55e;font-weight:600;gap:6px}
+.sb-solpx .mono{color:#4ade80}
+.sb-solpx.px-up .mono{animation:sbPxUp 1.2s ease-out}
+.sb-solpx.px-down .mono{animation:sbPxDown 1.2s ease-out}
+@keyframes sbPxUp{0%{color:#86efac;text-shadow:0 0 10px rgba(74,222,128,.7)}100%{color:#4ade80;text-shadow:none}}
+@keyframes sbPxDown{0%{color:#f87171;text-shadow:0 0 10px rgba(248,113,113,.7)}100%{color:#4ade80;text-shadow:none}}

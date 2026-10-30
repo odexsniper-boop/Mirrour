@@ -3786,8 +3786,24 @@ function collectIssues() {
   return items;
 }
 
+let sbLastSolPx = 0;
 function renderStatusBar() {
   if (!engineState) return;
+  // live SOL price (left of the status bar): flashes green/red when it moves
+  const pxEl = document.getElementById('sb-solpx-n');
+  const solNow = Number(engineState?.chains?.solana?.nativePriceUsd) || 0;
+  if (pxEl && solNow > 0) {
+    pxEl.textContent = `$${solNow.toFixed(2)}`;
+    const box = document.getElementById('sb-solpx');
+    if (box && sbLastSolPx > 0 && Math.abs(solNow - sbLastSolPx) >= 0.005) {
+      const dir = solNow > sbLastSolPx ? 'up' : 'down';
+      box.classList.remove('px-up', 'px-down');
+      void box.offsetWidth; // restart the flash
+      box.classList.add(`px-${dir}`);
+      box.title = `Live SOL price · ${dir === 'up' ? '▲' : '▼'} $${Math.abs(solNow - sbLastSolPx).toFixed(2)} since last update`;
+    }
+    sbLastSolPx = solNow;
+  }
   const issues = collectIssues();
   const iEl = document.getElementById('sb-issues-n');
   if (iEl) iEl.textContent = issues.length ? `${issues.length.toLocaleString()} Issue${issues.length === 1 ? '' : 's'} Tracked` : 'No issues';
