@@ -102,6 +102,21 @@ function uiAmount(tb) {
  * wallet, return the swap the wallet made, or `{ skip: reason }` if it wasn't a simple
  * buy or sell against SOL / USDC / USDT.
  */
+/**
+ * Drop "dust" token moves that ride along with a real trade: a move under 1 token when another
+ * token moved at least 1,000 the same way. Some traders add a tiny transfer of a second token to
+ * every buy so copy bots see "multiple tokens moved" and skip it; pump.fun coins (1B supply) never
+ * trade in amounts under 1 token. delta(m): signed UI amount (+ in, − out).
+ */
+export function dropDustMoves(moves, delta) {
+  if (!Array.isArray(moves) || moves.length < 2) return moves;
+  return moves.filter((m) => {
+    const d = delta(m);
+    if (Math.abs(d) >= 1) return true;
+    return !moves.some((o) => o !== m && Math.sign(delta(o)) === Math.sign(d) && Math.abs(delta(o)) >= 1000);
+  });
+}
+
 export function parseSwapFromTransaction(tx, wallet) {
   if (!tx || !tx.meta || !tx.transaction) return { skip: 'no transaction data' };
   if (tx.meta.err) return { skip: 'failed transaction' };
@@ -170,6 +185,8 @@ export function parseSwapFromTransaction(tx, wallet) {
     const real = tokenMoves.filter((t) => t.rel >= 1e-4);
     if (real.length >= 1) tokenMoves = real;
   }
+  // ignore dust sent along with a real trade (copy-bot bait: e.g. +0.04 of another token in every buy)
+  tokenMoves = dropDustMoves(tokenMoves, (t) => t.delta);
 
   if (tokenMoves.length === 0) return { skip: 'no token bought or sold (transfer, stake or SOL/stable only)' };
   if (tokenMoves.length > 1) {
@@ -396,6 +413,8 @@ export function diffHoldings(prev, now) {
       before,
     });
   }
+  const kept = dropDustMoves(moves, (m) => (m.side === 'buy' ? m.tokenAmount : -m.tokenAmount));
+  if (kept !== moves) moves.splice(0, moves.length, ...kept);
   const buys = moves.filter((m) => m.side === 'buy');
   const sells = moves.filter((m) => m.side === 'sell');
   const stableOut = Object.entries(stable).find(([, v]) => v < 0);

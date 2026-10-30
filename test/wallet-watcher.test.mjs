@@ -470,3 +470,36 @@ test('W21 dust nudge on another held token does not hide a real buy (Decu-style 
   const t2 = makeTx({ pre: [tb(2, MEME, WALLET, 1e12), tb(3, MEME2, WALLET, 0)], post: [tb(2, MEME, WALLET, 0), tb(3, MEME2, WALLET, 5e12)] });
   assert.match(parseSwapFromTransaction(t2, WALLET).skip, /token-to-token/);
 });
+
+// ---------- copy-bot bait: dust of a second token in every buy (Decu, 30 Oct) ----------
+import { dropDustMoves, diffHoldings as diffHoldingsDust } from '../engine/walletWatcher.mjs';
+
+test('dust bait: a buy that also receives +0.04 of another token is still read as a buy of the real coin', () => {
+  const W = '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9';
+  const COIN = 'B1indApe1111111111111111111111111111111pump';
+  const DUST = 'NeuraL1nk11111111111111111111111111111pump';
+  const tb = (mint, amount) => ({ accountIndex: mint === COIN ? 2 : 3, mint, owner: W, uiTokenAmount: { amount: String(amount), decimals: 6 } });
+  const tx = {
+    slot: 1, blockTime: Math.floor(Date.now() / 1000),
+    meta: { err: null, fee: 5000, preBalances: [435.041048395e9, 0, 0, 0, 1], postBalances: [431.60359821e9, 0, 0, 0, 1], preTokenBalances: [], postTokenBalances: [tb(COIN, 30751441657619), tb(DUST, 44534)] },
+    transaction: { signatures: ['x'], message: { accountKeys: [{ pubkey: W }, { pubkey: 'Pool111111111111111111111111111111111111111' }, { pubkey: 'Acc1111111111111111111111111111111111111111' }, { pubkey: 'Acc2111111111111111111111111111111111111111' }, { pubkey: '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P' }] } },
+  };
+  const s = parseSwapFromTransaction(tx, W);
+  assert.equal(s.skip, undefined, s.skip);
+  assert.equal(s.side, 'buy');
+  assert.equal(s.tokenMint, COIN);
+  assert.ok(Math.abs(s.tokenAmount - 30751441.657619) < 1e-3);
+  assert.equal(s.quoteSymbol, 'SOL');
+  // two real coins in one transaction is still unclear and skipped
+  const two = JSON.parse(JSON.stringify(tx));
+  two.meta.postTokenBalances[1].uiTokenAmount.amount = String(5_000_000 * 1e6);
+  assert.equal(parseSwapFromTransaction(two, W).skip, 'multiple tokens moved');
+});
+
+test('dust bait: balance-watch mode (flooded wallets) also ignores the dust token', () => {
+  const kept = dropDustMoves([{ side: 'buy', tokenAmount: 30_751_441 }, { side: 'buy', tokenAmount: 0.0445 }], (m) => (m.side === 'buy' ? m.tokenAmount : -m.tokenAmount));
+  assert.equal(kept.length, 1);
+  assert.equal(kept[0].tokenAmount, 30_751_441);
+  // a small real sell next to a big buy is not "dust" of the same direction
+  assert.equal(dropDustMoves([{ d: 50_000 }, { d: -0.5 }], (m) => m.d).length, 2);
+});
