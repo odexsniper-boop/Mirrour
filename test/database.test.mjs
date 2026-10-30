@@ -235,3 +235,14 @@ test('D9 paper fills carry no made-up transaction hash and link back to the foll
   assert.equal(h.traderWallet, WALLET);
   assert.equal(e.positions[0].traderWallet, WALLET);
 });
+
+test('settings migration: a saved 20 s real-copy limit (old default) becomes 10 s', async () => {
+  const { CopyTradingEngine } = await import('../engine/copyEngine.mjs');
+  const { restoreEngine } = await import('../engine/persistence.mjs');
+  const e = new CopyTradingEngine();
+  restoreEngine(e, { settings: { maxRealSignalAgeSec: 20 } });
+  assert.equal(e.settings.maxRealSignalAgeSec, 10);
+  const e2 = new CopyTradingEngine();
+  restoreEngine(e2, { settings: { maxRealSignalAgeSec: 15 } });
+  assert.equal(e2.settings.maxRealSignalAgeSec, 15, 'a value set on purpose is kept');
+});

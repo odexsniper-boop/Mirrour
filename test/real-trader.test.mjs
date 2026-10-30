@@ -804,13 +804,13 @@ test('EARNY race end-to-end: "trader sold" sells position A while B’s buy of t
   assert.ok(Math.abs(B.remainingTokens * 1e6 - Number(tokB)) < 2, `B holds ${B.remainingTokens}, wallet has ${Number(tokB) / 1e6}`);
 });
 
-test('late-copy guard: a real copy more than 20 s after the trader is skipped; paper keeps 90 s', async () => {
+test('late-copy guard: a real copy more than 10 s after the trader is skipped; paper keeps 90 s', async () => {
   const { trader } = world();
   const { e, f } = engineFor(trader, { mode: 'buy-hold' });
-  const late = { ...buySig(f), ageSec: 25 };
+  const late = { ...buySig(f), ageSec: 11 };
   const r = await e.processTraderSignal(late);
   assert.equal(r[0].status, 'skipped');
-  assert.match(r[0].reason, /too old to copy \(25s after the trader — limit 20s\)/);
+  assert.match(r[0].reason, /too old to copy \(11s after the trader — limit 10s\)/);
   const fresh = await e.processTraderSignal({ ...buySig(f), ageSec: 3 });
   assert.equal(fresh[0].status, 'filled', fresh[0].reason);
   const p = engineFor(trader, { mode: 'buy-hold', paper: true });

@@ -51,6 +51,8 @@ export function restoreEngine(engine, data) {
         merged[k] = { ...engine.settings[k], ...data.settings[k] };
       }
     }
+    // real-copy age limit: the first version saved 20 s as its default; the limit is now 10 s
+    if (merged.maxRealSignalAgeSec === 20) merged.maxRealSignalAgeSec = 10;
     engine.settings = merged;
   }
   if (Array.isArray(data.buyCooldown)) engine.buyCooldownMap = new Map(data.buyCooldown);

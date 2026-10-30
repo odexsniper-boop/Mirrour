@@ -222,7 +222,7 @@ export class CopyTradingEngine {
       retryBuys: true,
       maxChasePct: 25, // 1% - 1000%, default 25%
       maxSignalAgeSec: 90, // never copy a buy detected more than 90s after it landed on-chain (paper)
-      maxRealSignalAgeSec: 20, // real SOL: never copy a buy more than 20 s after the trader's buy landed
+      maxRealSignalAgeSec: 10, // real SOL: never copy a buy more than 10 s after the trader's buy landed
       muteWarnings: false,
       filters: {
         pumpOnly: false, // Launchpad-only on EVM
@@ -575,10 +575,10 @@ export class CopyTradingEngine {
     }
 
     // Late copies lose: by then the copier wave has moved the price (or the trader has left).
-    // Real SOL: at most maxRealSignalAgeSec (20 s) after the trader's buy landed; paper keeps the
+    // Real SOL: at most maxRealSignalAgeSec (10 s) after the trader's buy landed; paper keeps the
     // looser maxSignalAgeSec (90 s) so paper results stay comparable with earlier runs.
     const realCopy = !this.settings.paperTrading;
-    const maxAge = follow.chainId === 'solana' ? Number(realCopy ? this.settings.maxRealSignalAgeSec ?? 20 : this.settings.maxSignalAgeSec ?? 90) : 30;
+    const maxAge = follow.chainId === 'solana' ? Number(realCopy ? this.settings.maxRealSignalAgeSec ?? 10 : this.settings.maxSignalAgeSec ?? 90) : 30;
     if (Number.isFinite(Number(signal.ageSec)) && signal.ageSec > maxAge) {
       if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
       return this.recordSkip({ dryRun, follow, wallet, signal, reason: `trade is too old to copy (${Math.round(signal.ageSec)}s after the trader — limit ${maxAge}s)` });
