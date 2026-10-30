@@ -85,7 +85,7 @@ if (persistence && supabase.enabled && !db.get('engine')) {
   try {
     const rows = await supabase.pullAll();
     if (rows.get('engine')) {
-      db.setMany([...rows.entries()].filter(([k]) => k === 'engine' || k === 'liveSignals' || k === 'realTrader'));
+      db.setMany([...rows.entries()].filter(([k]) => k === 'engine' || k === 'liveSignals' || k === 'realTrader' || k === 'daxChat'));
       console.log('Database: restored from Supabase (local database was empty)');
     }
   } catch (err) {
@@ -382,6 +382,25 @@ setTimeout(() => runRentReclaim({ why: 'start' }).catch(() => {}), 90_000).unref
 
 // Dax chat (text / voice): Claude with READ-ONLY tools over the bot's records (needs ANTHROPIC_API_KEY)
 const daxAge = (t) => (t ? Math.round((Date.now() - t) / 1000) : null);
+// Dax chat history (server side, newest last): local database + Supabase so it survives redeploys
+let daxHistory = (() => {
+  try {
+    const saved = db?.get('daxChat');
+    return Array.isArray(saved?.msgs) ? saved.msgs.slice(-100) : [];
+  } catch {
+    return [];
+  }
+})();
+function saveDaxHistory() {
+  daxHistory = daxHistory.slice(-100);
+  const value = { msgs: daxHistory, savedAt: Date.now() };
+  try {
+    db?.set('daxChat', value);
+  } catch {
+    // best effort
+  }
+  if (supabase.enabled && holdsData()) supabase.push([['daxChat', value]]).catch(() => {});
+}
 export const daxChat = new DaxChat({
   tools: {
     get_report: ({ period }) => daxReport(['today', '24h', '7d', 'all'].includes(period) ? period : '24h').markdown,
@@ -991,10 +1010,30 @@ export const server = http.createServer(async (req, res) => {
       }
       return sendJson(res, 200, { ok: true, period: rep.period, generatedAt: rep.generatedAt, findings: rep.findings, markdown: rep.markdown, summaryText: rep.summaryText, dax: daxPublicSettings() });
     }
+    // Dax chat: the conversation is kept on the server (database + Supabase), not in the browser
+    if (req.method === 'GET' && pathname === '/api/dax/history') {
+      return sendJson(res, 200, { ok: true, msgs: daxHistory.slice(-60) });
+    }
+    if (req.method === 'DELETE' && pathname === '/api/dax/history') {
+      daxHistory = [];
+      saveDaxHistory();
+      return sendJson(res, 200, { ok: true, msgs: [] });
+    }
     if (req.method === 'POST' && pathname === '/api/dax/chat') {
       const body = await readJsonBody(req);
-      const r = await daxChat.reply(Array.isArray(body.messages) ? body.messages : [], { voice: Boolean(body.voice) });
-      return sendJson(res, r.ok ? 200 : 400, { ...r, ...(r.error ? { error: redact(r.error, process.env.ANTHROPIC_API_KEY) } : {}) });
+      const voice = Boolean(body.voice);
+      // new clients send only the question; older ones the whole conversation (its last user message is the question)
+      const fromList = Array.isArray(body.messages) ? [...body.messages].reverse().find((m) => m && m.role === 'user')?.text : '';
+      const text = String(body.text || fromList || '').trim().slice(0, 4000);
+      if (!text) return sendJson(res, 400, { ok: false, error: 'Ask Dax something first.' });
+      daxHistory.push({ role: 'user', text, voice, t: Date.now() });
+      const convo = daxHistory.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ role: m.role, text: m.text }));
+      const r = await daxChat.reply(convo, { voice });
+      const error = r.error ? redact(r.error, process.env.ANTHROPIC_API_KEY) : null;
+      if (r.ok) daxHistory.push({ role: 'assistant', text: r.text, mode: r.mode, t: Date.now() });
+      else daxHistory.push({ role: 'error', text: error || 'Dax could not answer.', t: Date.now() });
+      saveDaxHistory();
+      return sendJson(res, r.ok ? 200 : 400, { ...r, ...(error ? { error } : {}) });
     }
     if (req.method === 'GET' && pathname === '/api/dax/chat/status') {
       return sendJson(res, 200, { ok: true, ...daxChat.status(), lastError: daxChat.status().lastError ? redact(daxChat.status().lastError, process.env.ANTHROPIC_API_KEY) : null });

@@ -6360,18 +6360,26 @@ window.saveDaxDaily = async function saveDaxDaily() {
 // ============================================================================
 const daxc = { open: false, msgs: [], busy: false, status: null, rec: null, recOn: false, call: null };
 const DAX_CHIPS = ['What is the delay right now?', 'Why were trades skipped?', 'Why did my last real trades lose?', 'How much did we make today?', 'What are my open positions?', 'How much SOL is left in the bot wallet?'];
-try {
-  const saved = JSON.parse(localStorage.getItem('odex.daxChat') || '[]');
-  if (Array.isArray(saved)) daxc.msgs = saved.slice(-40);
-} catch {
-  // storage unavailable: start fresh
-}
-function saveDaxChat() {
+// The conversation lives on the server (it survives redeploys and is the same on every device)
+async function loadDaxHistory() {
   try {
-    localStorage.setItem('odex.daxChat', JSON.stringify(daxc.msgs.slice(-40)));
+    const d = await (await fetch('/api/dax/history', { cache: 'no-store' })).json();
+    if (Array.isArray(d.msgs)) {
+      daxc.msgs = d.msgs.slice(-60);
+      renderDaxChat();
+    }
   } catch {
-    // ignore
+    // offline: keep what is shown
   }
+}
+try {
+  localStorage.removeItem('odex.daxChat'); // old browser-only copy
+} catch {
+  // ignore
+}
+setTimeout(loadDaxHistory, 800);
+function saveDaxChat() {
+  // saved by the server with every question and answer
 }
 const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition || null;
 const voiceSupported = Boolean(SpeechRec && window.speechSynthesis);
@@ -6438,8 +6446,7 @@ async function askDax(text, { voice = false } = {}) {
   renderDaxChat(true);
   let reply = null;
   try {
-    const history = daxc.msgs.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ role: m.role, text: m.text }));
-    const r = await fetch('/api/dax/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: history, voice }) });
+    const r = await fetch('/api/dax/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, voice }) });
     const d = await r.json().catch(() => ({}));
     if (d.ok) {
       reply = d.text;
@@ -6468,8 +6475,8 @@ window.sendDaxMessage = async function sendDaxMessage(preset) {
 
 window.clearDaxChat = function clearDaxChat() {
   daxc.msgs = [];
-  saveDaxChat();
   renderDaxChat();
+  fetch('/api/dax/history', { method: 'DELETE' }).catch(() => {});
 };
 
 // ---------- speech out ----------
