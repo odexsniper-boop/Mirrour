@@ -57,7 +57,9 @@ export class LiveSignalService {
     const heliusKey = String(env.HELIUS_API_KEY || '').trim() || null;
     const sodaeUrl = String(env.SODAE_RPC_URL || '').trim() || null;
     const sodaeKey = sodaeUrl ? new URL(sodaeUrl).searchParams.get('api-key') || null : null;
-    const sodaeWs = sodaeUrl ? String(env.SODAE_WS_URL || '').trim() || sodaeWsFrom(sodaeUrl) : null;
+    // Sodae's WebSocket is not at the validator-convention address (checked: port 8900 does not
+    // answer, 8899 refuses WebSockets), so it is only used when SODAE_WS_URL is set explicitly
+    const sodaeWs = String(env.SODAE_WS_URL || '').trim() || null;
     const grpcUrl = String(env.SODAE_GRPC_URL || env.YELLOWSTONE_GRPC_URL || '').trim() || null;
     const grpcKey = grpcUrl ? (() => { try { return new URL(grpcUrl).searchParams.get('api-key'); } catch { return null; } })() : null;
     this.watcher =
@@ -78,8 +80,7 @@ export class LiveSignalService {
               fastRpcUrls: [`https://mainnet.helius-rpc.com/?api-key=${heliusKey}`],
             }
           : {}),
-        // Sodae (SODAE_RPC_URL): a second live feed racing Helius. Its WebSocket is the validator
-        // convention — same host, RPC port + 1 (8899 → 8900) — unless SODAE_WS_URL is set.
+        // Sodae WebSocket (SODAE_WS_URL): a second live feed racing Helius
         ...(sodaeWs ? { extraStreamUrl: sodaeWs, extraStreamName: 'Sodae' } : {}),
         // Yellowstone gRPC (SODAE_GRPC_URL or YELLOWSTONE_GRPC_URL): the fastest feed
         ...(grpcUrl ? { grpcUrl } : {}),
