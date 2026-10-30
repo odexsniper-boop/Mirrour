@@ -803,3 +803,32 @@ test('EARNY race end-to-end: "trader sold" sells position A while B’s buy of t
   assert.equal(A.remainingTokens, 0);
   assert.ok(Math.abs(B.remainingTokens * 1e6 - Number(tokB)) < 2, `B holds ${B.remainingTokens}, wallet has ${Number(tokB) / 1e6}`);
 });
+
+test('late-copy guard: a real copy more than 20 s after the trader is skipped; paper keeps 90 s', async () => {
+  const { trader } = world();
+  const { e, f } = engineFor(trader, { mode: 'buy-hold' });
+  const late = { ...buySig(f), ageSec: 25 };
+  const r = await e.processTraderSignal(late);
+  assert.equal(r[0].status, 'skipped');
+  assert.match(r[0].reason, /too old to copy \(25s after the trader — limit 20s\)/);
+  const fresh = await e.processTraderSignal({ ...buySig(f), ageSec: 3 });
+  assert.equal(fresh[0].status, 'filled', fresh[0].reason);
+  const p = engineFor(trader, { mode: 'buy-hold', paper: true });
+  const pr = await p.e.processTraderSignal({ ...buySig(p.f), ageSec: 25 });
+  assert.doesNotMatch(String(pr[0].reason || ''), /too old/);
+});
+
+test('trader-sold guard: a buy that reaches us after the trader already sold the coin is skipped (Soul)', async () => {
+  const { trader } = world();
+  const { e, f } = engineFor(trader, { mode: 'buy-hold' });
+  // the trader's sell came in through the live feed 2 s ago; the buy (landed 10 s ago) arrives now
+  e.traderLog = [{ t: Date.now() - 2000, w: f.traderWallet, mint: MINT, side: 'sell', copies: [] }];
+  const r = await e.processTraderSignal({ ...buySig(f), ageSec: 10 });
+  assert.equal(r[0].status, 'skipped');
+  assert.match(r[0].reason, /already sold this coin/);
+  // a sell from an earlier round (before this buy) does not block a new buy
+  e.traderLog = [{ t: Date.now() - 60_000, w: f.traderWallet, mint: MINT, side: 'sell', copies: [] }];
+  e.copiedCycles = {};
+  const ok = await e.processTraderSignal({ ...buySig(f), ageSec: 2 });
+  assert.equal(ok[0].status, 'filled', ok[0].reason);
+});

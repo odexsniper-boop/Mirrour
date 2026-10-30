@@ -221,7 +221,8 @@ export class CopyTradingEngine {
       },
       retryBuys: true,
       maxChasePct: 25, // 1% - 1000%, default 25%
-      maxSignalAgeSec: 90, // never copy a buy detected more than 90s after it landed on-chain
+      maxSignalAgeSec: 90, // never copy a buy detected more than 90s after it landed on-chain (paper)
+      maxRealSignalAgeSec: 20, // real SOL: never copy a buy more than 20 s after the trader's buy landed
       muteWarnings: false,
       filters: {
         pumpOnly: false, // Launchpad-only on EVM
@@ -573,10 +574,24 @@ export class CopyTradingEngine {
       return this.recordSkip({ dryRun, follow, wallet, signal, reason: follow.pauseReason === 'panic_sell' ? 'trader paused (Panic sell) — press Resume to copy again' : follow.pauseReason === 'slow' ? "trader paused (bot can't keep up)" : follow.pauseReason === 'streak' ? 'trader paused (losing streak)' : 'trader paused — press Resume to copy again' });
     }
 
-    const maxAge = follow.chainId === 'solana' ? Number(this.settings.maxSignalAgeSec ?? 90) : 30;
-    if (signal.ageSec && signal.ageSec > maxAge) {
+    // Late copies lose: by then the copier wave has moved the price (or the trader has left).
+    // Real SOL: at most maxRealSignalAgeSec (20 s) after the trader's buy landed; paper keeps the
+    // looser maxSignalAgeSec (90 s) so paper results stay comparable with earlier runs.
+    const realCopy = !this.settings.paperTrading;
+    const maxAge = follow.chainId === 'solana' ? Number(realCopy ? this.settings.maxRealSignalAgeSec ?? 20 : this.settings.maxSignalAgeSec ?? 90) : 30;
+    if (Number.isFinite(Number(signal.ageSec)) && signal.ageSec > maxAge) {
       if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
-      return this.recordSkip({ dryRun, follow, wallet, signal, reason: `trade is too old to copy (${Math.round(signal.ageSec)}s)` });
+      return this.recordSkip({ dryRun, follow, wallet, signal, reason: `trade is too old to copy (${Math.round(signal.ageSec)}s after the trader — limit ${maxAge}s)` });
+    }
+    // The trader already sold this coin after this buy (the buy reached us late, e.g. through a
+    // backup check while the sell came through the live feed): never buy what they have left.
+    if (follow.traderWallet && Array.isArray(this.traderLog)) {
+      const buyAt = Number.isFinite(Number(signal.ageSec)) ? Date.now() - Number(signal.ageSec) * 1000 : null;
+      const soldAfter = this.traderLog.some((e) => e.w === follow.traderWallet && e.mint === token.address && e.side === 'sell' && (buyAt === null ? Date.now() - e.t < 120_000 : e.t > buyAt - 1000) && (!e.sig || e.sig !== signal.signature));
+      if (soldAfter) {
+        if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
+        return this.recordSkip({ dryRun, follow, wallet, signal, reason: 'the trader already sold this coin — not buying after they left' });
+      }
     }
 
     // the daily loss limit is a rolling 24 h window: lift the pause once old losses roll out
