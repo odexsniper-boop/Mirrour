@@ -24,6 +24,18 @@ export function pickCurrentPrice(sig) {
   return r <= 3 && r >= 1 / 3 ? market : fill;
 }
 
+/** Sodae RPC URL → its WebSocket URL (http→ws, https→wss; port 8899 → 8900, the validator convention). */
+export function sodaeWsFrom(httpUrl) {
+  try {
+    const u = new URL(httpUrl);
+    u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+    if (u.port === '8899') u.port = '8900';
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
 export class LiveSignalService {
   constructor({ engine, watcher = null, broadcast = () => {}, env = process.env, alchemy = null } = {}) {
     this.engine = engine;
@@ -43,6 +55,9 @@ export class LiveSignalService {
       manual: [], // [{ address, label }]
     };
     const heliusKey = String(env.HELIUS_API_KEY || '').trim() || null;
+    const sodaeUrl = String(env.SODAE_RPC_URL || '').trim() || null;
+    const sodaeKey = sodaeUrl ? new URL(sodaeUrl).searchParams.get('api-key') || null : null;
+    const sodaeWs = sodaeUrl ? String(env.SODAE_WS_URL || '').trim() || sodaeWsFrom(sodaeUrl) : null;
     this.watcher =
       watcher ||
       new SolanaWalletWatcher({
@@ -61,7 +76,10 @@ export class LiveSignalService {
               fastRpcUrls: [`https://mainnet.helius-rpc.com/?api-key=${heliusKey}`],
             }
           : {}),
-        redactUrl: (x) => redact(redact(x, alchemy?.apiKey), heliusKey),
+        // Sodae (SODAE_RPC_URL): a second live feed racing Helius. Its WebSocket is the validator
+        // convention — same host, RPC port + 1 (8899 → 8900) — unless SODAE_WS_URL is set.
+        ...(sodaeWs ? { extraStreamUrl: sodaeWs, extraStreamName: 'Sodae' } : {}),
+        redactUrl: (x) => redact(redact(redact(x, alchemy?.apiKey), heliusKey), sodaeKey),
       });
     this.heliusKey = heliusKey;
     this.watcher.onSignal = (s) => this.handleSignal(s);

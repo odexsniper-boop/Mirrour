@@ -432,6 +432,8 @@ export class SolanaWalletWatcher {
     streamUrl = null, // live push connection; default: the RPC URL as wss
     tokenStreamUrl = null, // token-account push (Helius): spam-proof, fastest buy/sell detection
     fastRpcUrls = [], // extra low-latency HTTP RPCs raced in parallel on live stream events
+    extraStreamUrl = null, // a second live push feed (e.g. Sodae) racing the main one; first to see a trade wins
+    extraStreamName = 'extra',
     redactUrl = (x) => x,
   } = {}) {
     this.rpcUrl = rpcUrl;
@@ -485,6 +487,20 @@ export class SolanaWalletWatcher {
       },
       onChange: () => this.emitStatus(),
     });
+    // Optional second live feed (Sodae): the same transaction pushes from another provider. Both
+    // feeds share the "seen signature" set, so each trade is handled once — by whichever arrived
+    // first. Spam-flooded wallets are left out (their pushes would only burn the feed's credits).
+    this.feedRace = { main: 0, extra: 0, extraName: extraStreamName };
+    this.firstSeenBy = new Map();
+    this.extraStream = extraStreamUrl
+      ? new WalletStream({
+          url: extraStreamUrl,
+          WebSocketImpl,
+          redactUrl,
+          onLogs: (address, ev) => this.handleStreamLogs(address, ev, 'extra'),
+          onChange: () => this.emitStatus(),
+        })
+      : null;
     // Second connection only for balance watching of spam-flooded wallets, used when the main
     // provider has no accountSubscribe (Alchemy). It only triggers checks; trades are still
     // read through the main RPC.
@@ -579,6 +595,12 @@ export class SolanaWalletWatcher {
     }
     if (on) this.stream.start();
     else this.stream.stop();
+    if (this.extraStream) {
+      const normal = all.filter((a) => !flooded.includes(a));
+      this.extraStream.setWallets(normal);
+      if (on && normal.length) this.extraStream.start();
+      else this.extraStream.stop();
+    }
     if (this.tokenStream) {
       this.tokenStream.setWallets(all);
       if (on && all.length) this.tokenStream.start();
@@ -635,9 +657,15 @@ export class SolanaWalletWatcher {
   }
 
   /** A pushed transaction that mentions a watched wallet. */
-  handleStreamLogs(address, ev) {
+  handleStreamLogs(address, ev, feed = 'main') {
     const w = this.wallets.get(address);
     if (!w || !ev?.signature) return;
+    // which live feed heard this transaction first (main = Helius, extra = Sodae)
+    if (this.extraStream && !this.firstSeenBy.has(ev.signature)) {
+      this.firstSeenBy.set(ev.signature, feed);
+      if (!ev.err) this.feedRace[feed] = (this.feedRace[feed] || 0) + 1;
+      if (this.firstSeenBy.size > 3000) this.firstSeenBy = new Map([...this.firstSeenBy].slice(-1500));
+    }
     if (ev.err) {
       this.streamStats.failedTx += 1; // failed transaction (spam floods are mostly these)
       return;
@@ -850,6 +878,7 @@ export class SolanaWalletWatcher {
       running: this.running,
       stream: {
         ...this.stream.status(),
+        extraFeed: this.extraStream ? { name: this.feedRace.extraName, ...this.extraStream.status(), firstMain: this.feedRace.main, firstExtra: this.feedRace.extra } : null,
         enabled: this.streamEnabled && this.running,
         swapsSeen: this.streamStats.swapsSeen,
         notSwap: this.streamStats.notSwap,
@@ -1697,6 +1726,7 @@ export class SolanaWalletWatcher {
     this.stream.stop();
     this.balanceStream.stop();
     this.tokenStream?.stop();
+    this.extraStream?.stop();
     this.emitStatus();
   }
 }

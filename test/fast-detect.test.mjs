@@ -251,3 +251,40 @@ test('FD10 engine: a phantom buy closes the copy it opened; other positions unto
   assert.deepEqual(sold, [['p1', 'auto-exit: trader trade never confirmed (dropped)']]);
   assert.equal(engine.phantomLog.length, 1);
 });
+
+import { sodaeWsFrom } from '../engine/liveSignals.mjs';
+
+test('Sodae: second live feed races Helius — the same trade is handled once, the first feed is counted', async () => {
+  const got = [];
+  const w = new SolanaWalletWatcher({ fetchImpl: async () => new Response('{}'), tokenInfo: { get: async () => null, solPriceUsd: async () => 200 }, onSignal: (s) => got.push(s), extraStreamUrl: 'ws://example.invalid:8900/?api-key=x', extraStreamName: 'Sodae' });
+  w.onTokenInfoLate = () => {};
+  w.running = true;
+  w.wallets.set(TRADER, { address: TRADER, label: 'decu', mode: 'full' });
+  w.fastDetect = () => true;
+  w.confirmDelaysMs = [];
+  w.rpc = async (m) => (m === 'getSignatureStatuses' ? { value: [{ err: null }] } : null);
+  assert.ok(w.extraStream, 'second feed created');
+  const ev = { signature: 'race-sig-1', err: null, logs: logs(), receivedAt: Date.now() };
+  w.handleStreamLogs(TRADER, ev, 'extra'); // Sodae first
+  w.handleStreamLogs(TRADER, ev, 'main'); // Helius a moment later
+  await until(() => got.length === 1);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(got.length, 1, 'one trade, one signal');
+  assert.equal(w.feedRace.extra, 1);
+  assert.equal(w.feedRace.main, 0);
+  assert.equal(w.getStatus().stream.extraFeed.name, 'Sodae');
+  // spam-flooded wallets stay off the second feed (they would burn its credits)
+  w.wallets.set(OTHER, { address: OTHER, label: 'spam', mode: 'balances' });
+  w.streamEnabled = true;
+  w.extraStream.start = () => {};
+  w.stream.start = () => {};
+  w.syncStreams();
+  assert.equal(w.extraStream.wanted.has(OTHER), false, 'flooded wallet not on the Sodae feed');
+  assert.equal(w.extraStream.wanted.has(TRADER), true, 'normal wallet is');
+});
+
+test('Sodae WebSocket address: http → ws, port 8899 → 8900, key kept', () => {
+  assert.equal(sodaeWsFrom('http://ams.rpc.sodae.io:8899?api-key=abc'), 'ws://ams.rpc.sodae.io:8900/?api-key=abc');
+  assert.equal(sodaeWsFrom('https://x.example/rpc?api-key=k'), 'wss://x.example/rpc?api-key=k');
+  assert.equal(sodaeWsFrom('not a url'), null);
+});

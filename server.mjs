@@ -103,10 +103,20 @@ if (persistence) {
 let solPriceLive = false;
 const heliusFastRpc = process.env.HELIUS_API_KEY ? `https://mainnet.helius-rpc.com/?api-key=${String(process.env.HELIUS_API_KEY).trim()}` : null;
 const jitoBlockEngine = process.env.ODEX_JITO_RPC_URL || 'https://mainnet.block-engine.jito.wtf/api/v1/transactions';
+// Sodae (optional): also receives our signed swaps (one credit each) — never used for routine reads,
+// so the free tier's 100k monthly credits last
+const sodaeRpc = String(process.env.SODAE_RPC_URL || '').trim() || null;
+const sodaeKeyOnly = (() => {
+  try {
+    return sodaeRpc ? new URL(sodaeRpc).searchParams.get('api-key') : null;
+  } catch {
+    return null;
+  }
+})();
 export const realTrader = new RealTrader({
   env: process.env,
   rpc: (method, params) => liveSignals.watcher.rpc(method, params, { fast: true }),
-  fastRpcUrls: [heliusFastRpc, liveSignals.watcher.rpcUrl, jitoBlockEngine].filter(Boolean),
+  fastRpcUrls: [heliusFastRpc, liveSignals.watcher.rpcUrl, jitoBlockEngine, sodaeRpc].filter(Boolean),
   solPrice: () => (solPriceLive ? CHAINS.solana.nativePriceUsd : 0),
   state: db ? db.get('realTrader') : null,
   onChange: () => {
@@ -137,7 +147,7 @@ engine.onUpdate((evt) => notifier.handleEngineEvent(evt));
 setInterval(() => notifier.scanAlerts(), 4000).unref?.();
 // On a public deploy, real trading needs a site password (otherwise anyone with the link could trade)
 const sendLog = []; // Bot Wallet → Send attempts (rate limit)
-const hideKeys = (msg) => redact(redact(String(msg), alchemy.apiKey), process.env.HELIUS_API_KEY);
+const hideKeys = (msg) => redact(redact(redact(String(msg), alchemy.apiKey), process.env.HELIUS_API_KEY), sodaeKeyOnly);
 const realBlockedReason = ON_RAILWAY && !SITE_PASSWORD ? 'public deploy without ODEX_PASSWORD: real trading is disabled' : null;
 const startedAt = Date.now();
 let shuttingDownFlag = false;
@@ -415,6 +425,7 @@ export const daxChat = new DaxChat({
         realTrades: realTrader.trades || [],
         swapRoute: realTrader.routeSetting(),
         fastDetect: { on: Boolean(liveSignals.watcher.fastDetect?.()), ...(liveSignals.watcher.fastStats || {}) },
+        feedRace: liveSignals.watcher.extraStream ? liveSignals.watcher.feedRace : null,
       },
       opts
     ),
