@@ -5992,7 +5992,7 @@ window.saveEditFollow = async function saveEditFollow() {
 // ---------------------------------------------------------------------------
 // Integrations (Settings → Integrations): Telegram + Discord trade alerts
 // ---------------------------------------------------------------------------
-const INTG = { telegram: { short: 'tg', name: 'Telegram' }, discord: { short: 'dc', name: 'Discord' } };
+const INTG = { telegram: { short: 'tg', name: 'Telegram' } };
 const INTG_EVENTS = [['copies', 'Copied buys'], ['sells', 'Sells & PnL'], ['problems', 'Problems']];
 let intgState = null;
 
@@ -6004,8 +6004,66 @@ function intgMsg(app, text, kind = '') {
   }
 }
 
+function renderDaxAi() {
+  const c = intgState?.dax;
+  if (!c) return;
+  const pill = document.getElementById('intg-dax-pill');
+  if (pill) {
+    pill.className = `intg-pill${c.configured ? (c.lastError ? ' is-bad' : ' is-on') : ''}`;
+    pill.textContent = c.configured ? (c.lastError ? 'Error' : 'Full AI') : 'Basic mode';
+  }
+  const key = document.getElementById('intg-dax-key');
+  if (key && !key.value) key.placeholder = c.keyMasked ? `Saved: ${c.keyMasked}` : c.source === 'railway' ? 'Using ANTHROPIC_API_KEY from Railway' : 'sk-ant-…';
+  const model = document.getElementById('intg-dax-model');
+  if (model && c.model && document.activeElement !== model) model.value = c.model;
+  const usage = document.getElementById('intg-dax-usage');
+  if (usage) usage.textContent = c.configured ? `${c.requests || 0} question${c.requests === 1 ? '' : 's'} since restart` : '';
+  const msg = document.getElementById('intg-dax-msg');
+  if (msg && c.lastError && !msg.textContent) {
+    msg.className = 'intg-msg is-bad';
+    msg.textContent = `Last error: ${c.lastError}`;
+  }
+}
+function daxAiMsg(text, kind = '') {
+  const el = document.getElementById('intg-dax-msg');
+  if (el) {
+    el.className = `intg-msg${kind ? ` is-${kind}` : ''}`;
+    el.textContent = text || '';
+  }
+}
+async function daxAiPost(sub, body) {
+  const res = await fetch(`/api/integrations/dax${sub ? `/${sub}` : ''}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
+  const data = await res.json().catch(() => ({ ok: false, error: `server answered ${res.status}` }));
+  if (data.dax) intgState = { ...(intgState || {}), dax: data.dax };
+  renderDaxAi();
+  return data;
+}
+window.daxAiSave = async function daxAiSave() {
+  const el = document.getElementById('intg-dax-key');
+  const apiKey = el.value.trim();
+  if (!apiKey) return daxAiMsg('Paste your Claude API key first.', 'bad');
+  const d = await daxAiPost('', { apiKey });
+  if (!d.ok) return daxAiMsg(d.error, 'bad');
+  el.value = '';
+  daxAiMsg('Saved — Dax is now a full AI. Press Test to check the key.', 'good');
+};
+window.daxAiModel = async function daxAiModel(model) {
+  const d = await daxAiPost('', { model });
+  daxAiMsg(d.ok ? 'Model saved.' : d.error, d.ok ? '' : 'bad');
+};
+window.daxAiTest = async function daxAiTest() {
+  daxAiMsg('Testing the key…');
+  const d = await daxAiPost('test');
+  daxAiMsg(d.ok ? `Key works — Claude answered "${d.reply || 'OK'}".` : `Test failed: ${d.error}`, d.ok ? 'good' : 'bad');
+};
+window.daxAiDisconnect = async function daxAiDisconnect() {
+  const d = await daxAiPost('disconnect');
+  daxAiMsg(d.ok ? (d.dax?.configured ? 'Removed — Dax now uses ANTHROPIC_API_KEY from Railway.' : 'Key removed — Dax is back in basic mode.') : d.error, d.ok ? '' : 'bad');
+};
+
 function renderIntegrations() {
   if (!intgState) return;
+  renderDaxAi();
   for (const app of Object.keys(INTG)) {
     const c = intgState[app] || {};
     const k = INTG[app].short;
@@ -6025,9 +6083,6 @@ function renderIntegrations() {
       if (tok && !tok.value) tok.placeholder = c.tokenMasked ? `Saved: ${c.tokenMasked}` : 'Bot token, e.g. 123456789:AAH…';
       const chat = document.getElementById('intg-tg-chat');
       if (chat && document.activeElement !== chat) chat.value = c.chatId || '';
-    } else {
-      const hook = document.getElementById('intg-dc-hook');
-      if (hook && !hook.value) hook.placeholder = c.hookMasked ? `Saved: ${c.hookMasked}` : 'https://discord.com/api/webhooks/…';
     }
     const ev = document.querySelector(`.intg-events[data-app="${app}"]`);
     if (ev) {
@@ -6049,7 +6104,7 @@ window.loadIntegrations = async function loadIntegrations() {
 async function intgPost(app, sub, body) {
   const res = await fetch(`/api/integrations/${app}${sub ? `/${sub}` : ''}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) });
   const data = await res.json();
-  if (data.telegram) intgState = { telegram: data.telegram, discord: data.discord };
+  if (data.telegram) intgState = { ...(intgState || {}), telegram: data.telegram, discord: data.discord };
   renderIntegrations();
   return data;
 }
@@ -6066,11 +6121,10 @@ window.intgFindTelegramChat = async function intgFindTelegramChat() {
 };
 
 window.intgSave = async function intgSave(app) {
-  const body = app === 'telegram' ? { botToken: document.getElementById('intg-tg-token').value.trim(), chatId: document.getElementById('intg-tg-chat').value.trim(), enabled: true } : { webhookUrl: document.getElementById('intg-dc-hook').value.trim(), enabled: true };
+  const body = { botToken: document.getElementById('intg-tg-token').value.trim(), chatId: document.getElementById('intg-tg-chat').value.trim(), enabled: true };
   const d = await intgPost(app, '', body);
   if (!d.ok) return intgMsg(app, d.error, 'bad');
-  if (app === 'telegram') document.getElementById('intg-tg-token').value = '';
-  else document.getElementById('intg-dc-hook').value = '';
+  document.getElementById('intg-tg-token').value = '';
   const c = d[app];
   intgMsg(app, c.configured ? 'Saved — alerts are on. Press Send test to check.' : app === 'telegram' ? 'Saved. Add the chat ID (or press Find my chat) to finish.' : 'Saved.', c.configured ? 'good' : '');
 };

@@ -133,6 +133,8 @@ export function publicSettings(settings) {
   if (!settings) return settings;
   // the Dax report link's secret never leaves the server (the page only learns that one exists)
   if (settings.daxShare) settings = { ...settings, daxShare: { enabled: Boolean(settings.daxShare.token), createdAt: settings.daxShare.createdAt || null } };
+  // the Dax (Claude) API key never leaves the server
+  if (settings.daxAi) settings = { ...settings, daxAi: { configured: Boolean(settings.daxAi.apiKey), model: settings.daxAi.model || null } };
   if (!settings.integrations) return settings;
   const { telegram = {}, discord = {} } = settings.integrations;
   return {

@@ -205,6 +205,7 @@ async function instanceHeartbeat() {
         if (cloudEngine && Number(cloudEngine.savedAt || 0) > startedAt) {
           persistence.restoreFromRows(rows);
           liveSignals.sync();
+          applyDaxAi();
           console.log('One-bot lock: took over and loaded the latest data from Supabase');
         }
         const rt = rows.get('realTrader');
@@ -382,6 +383,27 @@ setTimeout(() => runRentReclaim({ why: 'start' }).catch(() => {}), 90_000).unref
 
 // Dax chat (text / voice): Claude with READ-ONLY tools over the bot's records (needs ANTHROPIC_API_KEY)
 const daxAge = (t) => (t ? Math.round((Date.now() - t) / 1000) : null);
+// Dax agent API key: set in Settings → Integrations (kept in settings on the server), or ANTHROPIC_API_KEY
+const DAX_MODELS = ['claude-sonnet-5-5', 'claude-haiku-5-5', 'claude-opus-5-5'];
+function applyDaxAi() {
+  const s = engine.settings.daxAi || {};
+  daxChat.apiKey = String(s.apiKey || process.env.ANTHROPIC_API_KEY || '').trim();
+  daxChat.model = s.model || process.env.DAX_MODEL || DAX_MODELS[0];
+}
+function daxAiPublic() {
+  const s = engine.settings.daxAi || {};
+  const key = String(s.apiKey || '').trim();
+  const fromEnv = !key && Boolean(String(process.env.ANTHROPIC_API_KEY || '').trim());
+  return {
+    configured: Boolean(key) || fromEnv,
+    source: key ? 'dashboard' : fromEnv ? 'railway' : null,
+    keyMasked: key ? `sk-ant-…${key.slice(-4)}` : null,
+    model: daxChat?.model || s.model || DAX_MODELS[0],
+    models: DAX_MODELS,
+    requests: daxChat?.stats?.requests || 0,
+    lastError: daxChat?.stats?.lastError ? redact(daxChat.stats.lastError, daxChat.apiKey) : null,
+  };
+}
 // Dax chat history (server side, newest last): local database + Supabase so it survives redeploys
 let daxHistory = (() => {
   try {
@@ -457,6 +479,7 @@ export const daxChat = new DaxChat({
       opts
     ),
 });
+applyDaxAi(); // a key saved in Settings → Integrations wins over ANTHROPIC_API_KEY
 
 // Daily report to Telegram / Discord at the chosen UTC hour (once a day, only on the trading copy)
 setInterval(async () => {
@@ -948,7 +971,38 @@ export const server = http.createServer(async (req, res) => {
 
     // App integrations: Telegram + Discord trade alerts (secrets stay on the server)
     if (pathname === '/api/integrations' && req.method === 'GET') {
-      return sendJson(res, 200, { ok: true, ...notifier.publicConfig() });
+      return sendJson(res, 200, { ok: true, ...notifier.publicConfig(), dax: daxAiPublic() });
+    }
+    // Dax agent API (Settings → Integrations): the Claude API key that makes Dax a full AI
+    if (pathname.startsWith('/api/integrations/dax') && req.method === 'POST') {
+      const sub = pathname.split('/')[4] || '';
+      const body = await readJsonBody(req);
+      const cur = { ...(engine.settings.daxAi || {}) };
+      try {
+        if (sub === 'disconnect') {
+          delete cur.apiKey;
+          engine.settings.daxAi = cur;
+        } else if (sub === 'test') {
+          if (!daxChat.aiEnabled) throw new Error('add an API key first');
+          const r = await daxChat.call({ messages: [{ role: 'user', content: 'Reply with the single word OK.' }], voice: true, allowTools: false });
+          const text = (r.content || []).filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
+          return sendJson(res, 200, { ok: true, reply: text.slice(0, 80), dax: daxAiPublic() });
+        } else if (!sub) {
+          if (body.apiKey !== undefined && String(body.apiKey).trim()) {
+            const k = String(body.apiKey).trim();
+            if (!/^sk-ant-[A-Za-z0-9_-]{20,}$/.test(k)) throw new Error('that does not look like a Claude API key (it starts with sk-ant-)');
+            cur.apiKey = k;
+            cur.savedAt = Date.now();
+          }
+          if (body.model !== undefined) cur.model = DAX_MODELS.includes(body.model) ? body.model : DAX_MODELS[0];
+          engine.settings.daxAi = cur;
+        } else return sendJson(res, 404, { ok: false, error: 'Unknown action.' });
+        applyDaxAi();
+        engine.emit('settings_updated', {}); // saves (database + Supabase)
+        return sendJson(res, 200, { ok: true, dax: daxAiPublic() });
+      } catch (err) {
+        return sendJson(res, 400, { ok: false, error: redact(String(err.message || err), daxChat.apiKey), dax: daxAiPublic() });
+      }
     }
     if (pathname.startsWith('/api/integrations/') && req.method === 'POST') {
       const [, , , app, sub] = pathname.split('/');

@@ -6931,3 +6931,23 @@ body.logged-out .cfg-signout{display:none}
 .sb-solpx.px-down .mono{animation:sbPxDown 1.2s ease-out}
 @keyframes sbPxUp{0%{color:#86efac;text-shadow:0 0 10px rgba(74,222,128,.7)}100%{color:#4ade80;text-shadow:none}}
 @keyframes sbPxDown{0%{color:#f87171;text-shadow:0 0 10px rgba(248,113,113,.7)}100%{color:#4ade80;text-shadow:none}}
+
+/* Dax agent API card */
+.intg-logo-dax{background:#0b0b10;overflow:hidden}
+.intg-logo-dax img{border-radius:8px}
+.intg-dax-usage{margin-right:auto;font-size:12px;color:var(--text-dim)}
+
+/* Settings menu — compact list style (icon + label, neutral highlight), like a native app sidebar */
+.cfg-layout{grid-template-columns:210px minmax(0,1fr)}
+.cfg-side{gap:6px}
+.cfg-nav{gap:2px;padding:0;background:transparent;border:0;border-radius:0}
+.cfg-nav-btn,.cfg-signout{gap:10px;padding:7px 10px;border:0;border-radius:10px;background:transparent;color:#d4d4d8}
+.cfg-nav-btn:hover,.cfg-signout:hover{background:rgba(255,255,255,.05);color:#fafafa}
+.cfg-nav-btn.active{background:rgba(255,255,255,.08);color:#fafafa}
+.cfg-nav-ico,.cfg-nav-btn.active .cfg-nav-ico{flex:0 0 18px;width:18px;height:18px;border-radius:0;background:transparent;color:inherit}
+.cfg-nav-ico svg,.cfg-nav-ico img{width:16px;height:16px}
+.cfg-nav-txt small{display:none}
+.cfg-nav-txt strong,.cfg-signout .cfg-nav-txt strong{font-size:14px;font-weight:400;color:inherit}
+.cfg-signout{margin-top:6px;border-top:1px solid rgba(255,255,255,.06);border-radius:0 0 10px 10px;padding-top:11px}
+.cfg-signout:hover{color:#f87171;background:rgba(248,113,113,.07);border-top-color:rgba(255,255,255,.06)}
+.cfg-signout:hover .cfg-nav-txt strong{color:#f87171}
