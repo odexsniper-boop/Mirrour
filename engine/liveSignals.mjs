@@ -319,6 +319,15 @@ export class LiveSignalService {
     if (!sig.backfill && typeof this.engine.observeTradePrice === 'function') {
       this.engine.observeTradePrice(sig.tokenMint, sig.txPriceUsd, sig.blockTime || Date.now());
     }
+    // Log the trader's trade before running the swap so any 2nd buy arriving while the 1st swap is
+    // still in flight already knows the trader entered this coin earlier.
+    if (!sig.backfill && typeof this.engine.logTraderTrade === 'function') {
+      try {
+        this.engine.logTraderTrade(sig, []);
+      } catch {
+        // reporting only
+      }
+    }
 
     if (willCopy) {
       // Each follow is matched by WALLET only and copies with its own settings

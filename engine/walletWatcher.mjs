@@ -968,14 +968,19 @@ export class SolanaWalletWatcher {
     }
   }
 
-  /** RPC call; a 429 (rate limited) is retried a few times with growing pauses. */
+  /** RPC call; a 429 (rate limited) is retried a few times with growing pauses. Fast calls race fastRpcUrls. */
   async rpc(method, params, { fast = false, rpcUrl = this.rpcUrl } = {}) {
+    const altUrls = fast && rpcUrl === this.rpcUrl ? (this.fastRpcUrls || []).filter((u) => u && u !== this.rpcUrl) : [];
     for (let attempt = 0; ; attempt++) {
       if (!fast) await this.throttle();
       try {
+        if (altUrls.length && attempt === 0) {
+          return await Promise.any([this.rpcOnce(method, params, rpcUrl), ...altUrls.map((u) => this.rpcOnce(method, params, u))]);
+        }
         return await this.rpcOnce(method, params, rpcUrl);
       } catch (err) {
-        if (!err.rateLimited || attempt >= 3) throw err;
+        const e = err instanceof AggregateError ? err.errors?.find((x) => x?.rateLimited) || err.errors?.[0] || err : err;
+        if (!e.rateLimited || attempt >= 3) throw e;
         await new Promise((r) => setTimeout(r, 500 * 2 ** attempt + Math.random() * 200));
       }
     }
@@ -991,8 +996,8 @@ export class SolanaWalletWatcher {
     const urls = [this.rpcUrl, ...extras];
     try {
       return await Promise.any(
-        urls.map(async (u, idx) => {
-          const r = idx === 0 ? await this.rpc(method, params, { fast: true }) : await this.rpcOnce(method, params, u);
+        urls.map(async (u) => {
+          const r = await this.rpcOnce(method, params, u);
           if (!isGood(r)) throw new Error('not indexed yet');
           return r;
         })

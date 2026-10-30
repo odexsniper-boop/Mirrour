@@ -451,9 +451,11 @@ export class RealTrader {
     if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(String(mint || ''))) return null;
     const t0 = this.now();
     const curveAddr = PD.bondingCurveAddress(mint);
-    const [bhP, accP] = [this.recentBlockhash().catch(() => null), this.rpc('getMultipleAccounts', [[curveAddr, mint, this.address], { encoding: 'base64', commitment: 'processed' }])];
+    const ataSpl = PD.ataAddress(this.address, mint, PD.TOKEN_PROGRAM);
+    const ata2022 = PD.ataAddress(this.address, mint, PD.TOKEN_2022_PROGRAM);
+    const [bhP, accP] = [this.recentBlockhash().catch(() => null), this.rpc('getMultipleAccounts', [[curveAddr, mint, this.address, ataSpl, ata2022], { encoding: 'base64', commitment: 'processed' }])];
     const acc = await accP;
-    const [curveAcc, mintAcc, userAcc] = acc?.value || [];
+    const [curveAcc, mintAcc, userAcc, ataSplAcc, ata2022Acc] = acc?.value || [];
     if (!curveAcc || curveAcc.owner !== PD.PUMP_PROGRAM) return null; // not on pump.fun's curve
     const curve = PD.decodeCurve(curveAcc.data?.[0]);
     const blocker = PD.directBlocker(curve);
@@ -463,10 +465,10 @@ export class RealTrader {
     }
     const baseTokenProgram = mintAcc?.owner;
     if (baseTokenProgram !== PD.TOKEN_PROGRAM && baseTokenProgram !== PD.TOKEN_2022_PROGRAM) return null;
-    const userAta = PD.ataAddress(this.address, mint, baseTokenProgram);
-    const ataInfo = await this.rpc('getMultipleAccounts', [[userAta], { encoding: 'base64', commitment: 'processed' }]).catch(() => null);
-    const preTokens = ataInfo?.value?.[0] ? PD.tokenAccountAmount(ataInfo.value[0].data?.[0]) : 0n;
-    const ataExists = Boolean(ataInfo?.value?.[0]);
+    const userAta = baseTokenProgram === PD.TOKEN_2022_PROGRAM ? ata2022 : ataSpl;
+    const ataAcc = baseTokenProgram === PD.TOKEN_2022_PROGRAM ? ata2022Acc : ataSplAcc;
+    const preTokens = ataAcc ? PD.tokenAccountAmount(ataAcc.data?.[0]) : 0n;
+    const ataExists = Boolean(ataAcc);
     const tokDec = Number.isInteger(token?.decimals) ? token.decimals : this.decimals.get(mint) ?? 6;
     this.decimals.set(mint, tokDec);
     let quotedPriceUsd;
@@ -897,7 +899,8 @@ export class RealTrader {
         const pre = this.prefetchedBalance;
         this.prefetchedBalance = null;
         const usable = pre && this.now() - pre.at < 5000 && pre.at > this.lastBuyDoneAt;
-        const bal = (usable && (await pre.promise)) || (await this.refreshBalance());
+        const directBal = quote?._direct?.preLamports !== undefined && this.now() - quote.timestamp < 5000 && quote.timestamp > this.lastBuyDoneAt ? { sol: Number(quote._direct.preLamports) / LAMPORTS, usdc: this.balance?.usdc ?? 0, at: quote.timestamp } : null;
+        const bal = directBal || (usable && (await pre.promise)) || (await this.refreshBalance());
         if (bal.sol < needSol) return release(this.fail(`not enough SOL: wallet has ${bal.sol.toFixed(4)}, needs ${needSol.toFixed(4)} (incl. ${this.caps.reserveSol} SOL kept for fees${pendingSol > 0 ? `, ${pendingSol.toFixed(4)} SOL for buys in progress` : ''})`));
         if (quoteMint === USDC_MINT && bal.usdc < amountUsd) return release(this.fail(`not enough USDC: wallet has ${bal.usdc.toFixed(2)}`));
       } catch (err) {

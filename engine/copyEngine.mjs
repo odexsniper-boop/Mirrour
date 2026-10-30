@@ -519,8 +519,18 @@ export class CopyTradingEngine {
     if (!Array.isArray(this.traderLog)) this.traderLog = [];
     const t = Number(sig.detectedAt) || Date.now();
     if (t < Date.now() - 7 * 24 * 3600_000) return; // older than the 7 days kept
+    const copies = outcomes.map((o) => ({ fid: o.followId, ok: Boolean(o.ok), dry: Boolean(o.dry), reason: o.reason ? String(o.reason).slice(0, 160) : null }));
+    if (sig.signature) {
+      for (let i = this.traderLog.length - 1; i >= Math.max(0, this.traderLog.length - 50); i--) {
+        if (this.traderLog[i]?.sig === sig.signature) {
+          if (copies.length) this.traderLog[i].copies = copies;
+          return;
+        }
+      }
+    }
     this.traderLog.push({
       t,
+      sig: sig.signature || null,
       w: sig.wallet,
       mint: sig.tokenMint,
       sym: sig.symbol || null,
@@ -530,7 +540,7 @@ export class CopyTradingEngine {
       share: sig.side === 'sell' ? Number(sig.sellSharePct) || null : null,
       mc: Number(sig.marketCapUsd) || null,
       lag: Number.isFinite(Number(sig.latencySec)) ? Number(sig.latencySec) : null,
-      copies: outcomes.map((o) => ({ fid: o.followId, ok: Boolean(o.ok), dry: Boolean(o.dry), reason: o.reason ? String(o.reason).slice(0, 160) : null })),
+      copies,
     });
     const since = Date.now() - 7 * 24 * 3600_000;
     if (this.traderLog.length > 6000 || (this.traderLog[0] && this.traderLog[0].t < since)) {
@@ -958,6 +968,7 @@ export class CopyTradingEngine {
     }
     if (real && (!execResult || execResult.ok === false)) {
       const why = execResult?.error || 'unknown error';
+      if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
       this.alerts.unshift({
         id: `alt-${randomUUID().slice(0, 8)}`,
         level: 'danger',

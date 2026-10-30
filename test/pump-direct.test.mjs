@@ -359,3 +359,20 @@ test('PD16 a buy marks its coin as in progress until shortly after it returns', 
   await p;
   assert.equal(trader.buyInProgress(mint), true, 'still marked right after (the engine books it next)');
 });
+
+test('PD17 direct buy reads curve, mint, user SOL, and both token accounts in one getMultipleAccounts call (no separate getBalance)', async () => {
+  const { trader, token } = world();
+  const calls = [];
+  const origRpc = trader.rpc;
+  trader.rpc = async (method, params) => {
+    calls.push(method);
+    return origRpc(method, params);
+  };
+  const q = await trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 10 });
+  const r = await trader.execute({ side: 'buy', token, amountUsd: 10, quote: q, slippagePct: 10 });
+  assert.equal(r.ok, true, r.error);
+  const preSendCalls = calls.slice(0, calls.indexOf('sendTransaction'));
+  assert.equal(preSendCalls.filter((m) => m === 'getMultipleAccounts').length, 1, `single 5-account read before send: ${preSendCalls.join(', ')}`);
+  assert.equal(preSendCalls.filter((m) => m === 'getBalance').length, 0, `no redundant getBalance before send: ${preSendCalls.join(', ')}`);
+});
+

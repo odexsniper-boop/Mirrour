@@ -4,6 +4,8 @@
  * follows, settings), less often for routine price ticks, and once more on shutdown.
  * Secrets (API keys inside RPC URLs) are never written.
  */
+import { followTraderExitRules } from './copyEngine.mjs';
+
 const HISTORY_CAP = 2000;
 const ALERTS_CAP = 200;
 const SIGNALS_CAP = 200;
@@ -29,7 +31,20 @@ export function serializeEngine(engine) {
 export function restoreEngine(engine, data) {
   if (!data || typeof data !== 'object') return null;
   if (Array.isArray(data.wallets) && data.wallets.length) engine.wallets = data.wallets;
-  if (Array.isArray(data.follows)) engine.follows = data.follows;
+  if (Array.isArray(data.follows)) {
+    engine.follows = data.follows;
+    for (const f of engine.follows) {
+      if ((f.id === 'fol-03782071' || f.traderWallet === '4vw54BmAogeRV3vPKWyFet5yf8DTLcREzdSzx4rw9Ud9') && !f.decuV2Migrated) {
+        f.mode = 'auto-exit';
+        f.mirrorSells = true;
+        f.exitRules = followTraderExitRules();
+        f.copyTopUps = false;
+        f.reentryCooldownMin = 10;
+        f.filtersOverride = { ...(f.filtersOverride || {}), minTraderBuyNative: 0.5 };
+        f.decuV2Migrated = true;
+      }
+    }
+  }
   if (Array.isArray(data.positions)) engine.positions = data.positions;
   if (Array.isArray(data.history)) engine.history = data.history;
   if (Array.isArray(data.realizedLog)) engine.realizedLog = data.realizedLog;

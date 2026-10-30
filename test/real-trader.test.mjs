@@ -897,3 +897,20 @@ test('late-copy limit end-to-end: decided at 9.5 s (passes) but cannot land by 1
   const ok = await e.processTraderSignal({ ...buySig(f), ageSec: 2 });
   assert.equal(ok[0].status, 'filled', ok[0].reason);
 });
+
+test('missed-entry guard: a failed real 1st buy marks the cycle missed so a 2nd bait/top-up buy is skipped', async () => {
+  const { w, trader } = world({ executeMode: 'fail' });
+  const { e, f } = engineFor(trader, { mode: 'buy-hold' });
+  f.copyTopUps = false;
+  // 1st buy fails on execution (e.g. Pump 6042 slippage)
+  const first = await e.processTraderSignal({ ...buySig(f), signature: 'sig-first-buy', ageSec: 1 });
+  assert.equal(first[0].status, 'skipped');
+  assert.equal(e.copiedCycleActive(f.id, MINT, 'missed'), true);
+  // 2nd buy lands 15 s later and would otherwise execute if not blocked
+  w.executeMode = 'ok';
+  const second = await e.processTraderSignal({ ...buySig(f), signature: 'sig-second-buy', ageSec: 1 });
+  assert.equal(second[0].status, 'skipped');
+  assert.match(second[0].reason, /first buy was too late|missed|never bought/i);
+  assert.equal(e.positions.length, 0);
+});
+
