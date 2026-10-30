@@ -58,6 +58,8 @@ export class LiveSignalService {
     const sodaeUrl = String(env.SODAE_RPC_URL || '').trim() || null;
     const sodaeKey = sodaeUrl ? new URL(sodaeUrl).searchParams.get('api-key') || null : null;
     const sodaeWs = sodaeUrl ? String(env.SODAE_WS_URL || '').trim() || sodaeWsFrom(sodaeUrl) : null;
+    const grpcUrl = String(env.SODAE_GRPC_URL || env.YELLOWSTONE_GRPC_URL || '').trim() || null;
+    const grpcKey = grpcUrl ? (() => { try { return new URL(grpcUrl).searchParams.get('api-key'); } catch { return null; } })() : null;
     this.watcher =
       watcher ||
       new SolanaWalletWatcher({
@@ -79,7 +81,9 @@ export class LiveSignalService {
         // Sodae (SODAE_RPC_URL): a second live feed racing Helius. Its WebSocket is the validator
         // convention — same host, RPC port + 1 (8899 → 8900) — unless SODAE_WS_URL is set.
         ...(sodaeWs ? { extraStreamUrl: sodaeWs, extraStreamName: 'Sodae' } : {}),
-        redactUrl: (x) => redact(redact(redact(x, alchemy?.apiKey), heliusKey), sodaeKey),
+        // Yellowstone gRPC (SODAE_GRPC_URL or YELLOWSTONE_GRPC_URL): the fastest feed
+        ...(grpcUrl ? { grpcUrl } : {}),
+        redactUrl: (x) => redact(redact(redact(redact(x, alchemy?.apiKey), heliusKey), sodaeKey), grpcKey),
       });
     this.heliusKey = heliusKey;
     this.watcher.onSignal = (s) => this.handleSignal(s);

@@ -285,7 +285,7 @@ export function smartDaxAnswer(question, ctx, { voice = false } = {}) {
           }
         }
       }
-      if (ctx.feedRace && (ctx.feedRace.main || ctx.feedRace.extra)) lines.push(`Live feeds — heard the trade first: Helius ${ctx.feedRace.main}, ${ctx.feedRace.extraName || 'Sodae'} ${ctx.feedRace.extra}`);
+      if (ctx.feedRace && (ctx.feedRace.main || ctx.feedRace.extra || ctx.feedRace.grpc)) lines.push(`Live feeds — heard the trade first: Helius ${ctx.feedRace.main}${ctx.feedRace.extra ? `, ${ctx.feedRace.extraName || 'Sodae'} WebSocket ${ctx.feedRace.extra}` : ''}${ctx.feedRace.grpc !== undefined ? `, Yellowstone gRPC ${ctx.feedRace.grpc}` : ''}`);
       lines.push(`Swap route: ${ctx.swapRoute === 'direct' ? 'Direct pump.fun' : 'Jupiter'} · Fast Trade Detection: ${ctx.fastDetect?.on ? 'on' : 'off'}${!ctx.fastDetect?.on || ctx.swapRoute !== 'direct' ? ' — turn both on in Settings → Trading & risk for ~1 s copies' : ''}`);
       if (ctx.fastDetect?.on && ctx.fastDetect.phantoms) lines.push(`Phantom trades closed (trader trade never landed): ${ctx.fastDetect.phantoms}`);
       add('Delay', lines);

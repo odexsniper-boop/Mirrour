@@ -288,3 +288,27 @@ test('Sodae WebSocket address: http → ws, port 8899 → 8900, key kept', () =>
   assert.equal(sodaeWsFrom('https://x.example/rpc?api-key=k'), 'wss://x.example/rpc?api-key=k');
   assert.equal(sodaeWsFrom('not a url'), null);
 });
+
+test('Yellowstone gRPC feed plugs into fast detection; the first feed to hear a trade wins', async () => {
+  const got = [];
+  const w = new SolanaWalletWatcher({ fetchImpl: async () => new Response('{}'), tokenInfo: { get: async () => null, solPriceUsd: async () => 200 }, onSignal: (s) => got.push(s), grpcUrl: 'http://example.invalid:10201?api-key=k' });
+  w.onTokenInfoLate = () => {};
+  w.running = true;
+  w.wallets.set(TRADER, { address: TRADER, label: 'decu', mode: 'full' });
+  w.fastDetect = () => true;
+  w.confirmDelaysMs = [];
+  w.rpc = async (m) => (m === 'getSignatureStatuses' ? { value: [{ err: null }] } : null);
+  assert.ok(w.grpcFeed);
+  assert.equal(w.grpcFeed.token, 'k');
+  const ev = { signature: 'grpc-sig-1', err: null, logs: logs(), slot: 1, receivedAt: Date.now() };
+  w.grpcFeed.onTx(TRADER, ev); // gRPC first
+  w.handleStreamLogs(TRADER, ev, 'main'); // Helius later
+  await until(() => got.length === 1);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(got.length, 1);
+  assert.equal(got[0].via, 'fast-logs');
+  assert.equal(w.feedRace.grpc, 1);
+  assert.equal(w.feedRace.main, 0);
+  assert.equal(w.getStatus().stream.grpcFeed.kind, 'yellowstone-grpc');
+  assert.doesNotMatch(JSON.stringify(w.getStatus().stream.grpcFeed), /api-key=k/, 'key not shown in status');
+});

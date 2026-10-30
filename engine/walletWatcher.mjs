@@ -20,6 +20,7 @@ export function isPumpFunCoin(swap) {
 }
 import { bondingCurvePda } from './pumpCurve.mjs';
 import { pumpTradeFromLogs, swapFromPumpTrade } from './pumpLogs.mjs';
+import { YellowstoneFeed } from './yellowstone.mjs';
 import { findProgramAddress, base58Decode as b58d } from './onchainMeta.mjs';
 const ASSOCIATED_TOKEN_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
 export const WSOL_MINT = 'So11111111111111111111111111111111111111112';
@@ -434,6 +435,7 @@ export class SolanaWalletWatcher {
     fastRpcUrls = [], // extra low-latency HTTP RPCs raced in parallel on live stream events
     extraStreamUrl = null, // a second live push feed (e.g. Sodae) racing the main one; first to see a trade wins
     extraStreamName = 'extra',
+    grpcUrl = null, // Yellowstone gRPC feed (e.g. Sodae): fastest way to hear the followed wallets' trades
     redactUrl = (x) => x,
   } = {}) {
     this.rpcUrl = rpcUrl;
@@ -490,7 +492,8 @@ export class SolanaWalletWatcher {
     // Optional second live feed (Sodae): the same transaction pushes from another provider. Both
     // feeds share the "seen signature" set, so each trade is handled once — by whichever arrived
     // first. Spam-flooded wallets are left out (their pushes would only burn the feed's credits).
-    this.feedRace = { main: 0, extra: 0, extraName: extraStreamName };
+    this.feedRace = { main: 0, extra: 0, grpc: 0, extraName: extraStreamName };
+    this.grpcFeed = grpcUrl ? new YellowstoneFeed({ url: grpcUrl, redactUrl, onTx: (address, ev) => this.handleStreamLogs(address, ev, 'grpc'), onChange: () => this.emitStatus() }) : null;
     this.firstSeenBy = new Map();
     this.extraStream = extraStreamUrl
       ? new WalletStream({
@@ -595,6 +598,12 @@ export class SolanaWalletWatcher {
     }
     if (on) this.stream.start();
     else this.stream.stop();
+    if (this.grpcFeed) {
+      // failed transactions are filtered out at the source, so even flooded wallets are cheap here
+      this.grpcFeed.setWallets(all);
+      if (on && all.length) this.grpcFeed.start();
+      else this.grpcFeed.stop();
+    }
     if (this.extraStream) {
       const normal = all.filter((a) => !flooded.includes(a));
       this.extraStream.setWallets(normal);
@@ -661,7 +670,7 @@ export class SolanaWalletWatcher {
     const w = this.wallets.get(address);
     if (!w || !ev?.signature) return;
     // which live feed heard this transaction first (main = Helius, extra = Sodae)
-    if (this.extraStream && !this.firstSeenBy.has(ev.signature)) {
+    if ((this.extraStream || this.grpcFeed) && !this.firstSeenBy.has(ev.signature)) {
       this.firstSeenBy.set(ev.signature, feed);
       if (!ev.err) this.feedRace[feed] = (this.feedRace[feed] || 0) + 1;
       if (this.firstSeenBy.size > 3000) this.firstSeenBy = new Map([...this.firstSeenBy].slice(-1500));
@@ -879,6 +888,7 @@ export class SolanaWalletWatcher {
       stream: {
         ...this.stream.status(),
         extraFeed: this.extraStream ? { name: this.feedRace.extraName, ...this.extraStream.status(), firstMain: this.feedRace.main, firstExtra: this.feedRace.extra } : null,
+        grpcFeed: this.grpcFeed ? { ...this.grpcFeed.status(), firstGrpc: this.feedRace.grpc, firstMain: this.feedRace.main } : null,
         enabled: this.streamEnabled && this.running,
         swapsSeen: this.streamStats.swapsSeen,
         notSwap: this.streamStats.notSwap,
@@ -1727,6 +1737,7 @@ export class SolanaWalletWatcher {
     this.balanceStream.stop();
     this.tokenStream?.stop();
     this.extraStream?.stop();
+    this.grpcFeed?.stop();
     this.emitStatus();
   }
 }

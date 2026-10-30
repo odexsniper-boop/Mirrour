@@ -147,7 +147,15 @@ engine.onUpdate((evt) => notifier.handleEngineEvent(evt));
 setInterval(() => notifier.scanAlerts(), 4000).unref?.();
 // On a public deploy, real trading needs a site password (otherwise anyone with the link could trade)
 const sendLog = []; // Bot Wallet → Send attempts (rate limit)
-const hideKeys = (msg) => redact(redact(redact(String(msg), alchemy.apiKey), process.env.HELIUS_API_KEY), sodaeKeyOnly);
+const grpcKeyOnly = (() => {
+  try {
+    const u = String(process.env.SODAE_GRPC_URL || process.env.YELLOWSTONE_GRPC_URL || '').trim();
+    return u ? new URL(u).searchParams.get('api-key') : null;
+  } catch {
+    return null;
+  }
+})();
+const hideKeys = (msg) => redact(redact(redact(redact(String(msg), alchemy.apiKey), process.env.HELIUS_API_KEY), sodaeKeyOnly), grpcKeyOnly);
 const realBlockedReason = ON_RAILWAY && !SITE_PASSWORD ? 'public deploy without ODEX_PASSWORD: real trading is disabled' : null;
 const startedAt = Date.now();
 let shuttingDownFlag = false;
@@ -425,7 +433,7 @@ export const daxChat = new DaxChat({
         realTrades: realTrader.trades || [],
         swapRoute: realTrader.routeSetting(),
         fastDetect: { on: Boolean(liveSignals.watcher.fastDetect?.()), ...(liveSignals.watcher.fastStats || {}) },
-        feedRace: liveSignals.watcher.extraStream ? liveSignals.watcher.feedRace : null,
+        feedRace: liveSignals.watcher.extraStream || liveSignals.watcher.grpcFeed ? liveSignals.watcher.feedRace : null,
       },
       opts
     ),
