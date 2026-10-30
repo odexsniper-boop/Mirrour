@@ -944,10 +944,17 @@ export class CopyTradingEngine {
         slippagePct: buySlippagePct,
         // first holding of this token opens a token account (rent) — same as a real buy
         newTokenAccount: !this.positions.some((p) => p.tokenAddress === token.address && p.remainingTokens > 0 && Boolean(p.isPaper) === paper),
+        // real copies: the late-copy limit holds until the swap is SENT (detection + quote time count too)
+        deadlineAt: real && follow.chainId === 'solana' && Number.isFinite(Number(signal.ageSec)) ? Date.now() - Number(signal.ageSec) * 1000 + Number(this.settings.maxRealSignalAgeSec ?? 10) * 1000 : null,
       });
     } catch (err) {
       if (!real) throw err;
       execResult = { ok: false, error: err.message };
+    }
+    // late-copy limit reached while detecting/quoting: nothing was sent — a normal skip, not an error
+    if (real && execResult && execResult.ok === false && execResult.late) {
+      if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
+      return this.recordSkip({ dryRun, follow, wallet, signal, reason: `trade is too old to copy — ${execResult.error}` });
     }
     if (real && (!execResult || execResult.ok === false)) {
       const why = execResult?.error || 'unknown error';

@@ -513,7 +513,7 @@ export class RealTrader {
    * { ok, signature, exec, inAmount, sendMs } | { priceMoved } | { unknown, signature } | { fallback, error }
    * `fallback` always means NOTHING was sent, so Jupiter can safely be used instead.
    */
-  async executeDirect({ side, token, quote, slippagePct }) {
+  async executeDirect({ side, token, quote, slippagePct, tooLate = () => false }) {
     const d = quote._direct;
     const mint = token.address;
     const slip = Number.isFinite(slippagePct) && slippagePct > 0 ? slippagePct : side === 'sell' ? 15 : 10;
@@ -581,6 +581,8 @@ export class RealTrader {
       inAmount = d.amount;
       outAmount = solDelta > 0n ? solDelta : 0n;
     }
+    // the simulation took time: still within the late-copy limit? (nothing sent → Jupiter is not tried either)
+    if (tooLate()) return { late: true, error: "too late to send — it would land past the late-copy limit after the trader's buy" };
     // never send (or book) the same signature twice
     if (!this.sentSigs) this.sentSigs = new Map();
     for (const [k, t] of this.sentSigs) if (this.now() - t > 120_000) this.sentSigs.delete(k);
@@ -838,7 +840,13 @@ export class RealTrader {
     }
   }
 
-  async executeNow({ side, token, amountUsd, quote, slippagePct, tokenAmount, assetMode = 'native', newTokenAccount = false, urgent = false, positionTokens = null }) {
+  async executeNow({ side, token, amountUsd, quote, slippagePct, tokenAmount, assetMode = 'native', newTokenAccount = false, urgent = false, positionTokens = null, deadlineAt = null }) {
+    // Late-copy limit: a buy must be on its way while it can still land within the limit after the
+    // trader's buy (~1 s to land). Checked here and again right before sending.
+    const LAND_MS = 1000;
+    const tooLate = () => side === 'buy' && Number.isFinite(Number(deadlineAt)) && deadlineAt > 0 && Date.now() > deadlineAt - LAND_MS;
+    const lateError = () => "too late to send — it would land past the late-copy limit after the trader's buy";
+    if (tooLate()) return this.fail(lateError(), { late: true });
     if (!this.ready()) return this.fail(this.keyError || 'real trading is not set up (ODEX_TRADER_KEY missing)');
     const px = Number(this.solPrice()) || 0;
     if (!(px > 0)) return this.fail('SOL price not known yet');
@@ -903,13 +911,18 @@ export class RealTrader {
     let signature = null;
     let timing = null;
     let directNote = null;
+    if (tooLate()) return release(this.fail(lateError(), { late: true }));
     if (quote?._direct && quote._side === side && quote._slippagePct === slippagePct && this.now() - quote.timestamp < 6000) {
-      const dr = await this.executeDirect({ side, token, quote, slippagePct });
+      const dr = await this.executeDirect({ side, token, quote, slippagePct, tooLate });
       if (dr.ok) {
         exec = dr.exec;
         signature = dr.signature;
         order = { inAmount: dr.inAmount };
         timing = { route: 'direct', quoteMs: quote._quoteMs ?? null, sendMs: dr.sendMs };
+      } else if (dr.late) {
+        // nothing was sent: skip the copy (Jupiter would be even later)
+        release();
+        return this.fail(dr.error, { late: true });
       } else if (dr.priceMoved && side === 'sell') {
         // a sell must get out: pump.fun refused our limit, so Jupiter (live slippage) takes it
         directNote = dr.error;
@@ -950,6 +963,7 @@ export class RealTrader {
         return release(this.fail(err.message, { backoff: Boolean(err.backoff), noTokens: Boolean(err.noTokens) }));
       }
 
+      if (tooLate()) return release(this.fail(lateError(), { late: true }));
       let signed;
       try {
         signed = signTransactionBase64(order.transaction, this.keypair);

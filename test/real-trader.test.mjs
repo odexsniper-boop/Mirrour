@@ -866,3 +866,34 @@ test('missed-entry guard: dust left from an earlier round is not a top-up; unkno
   assert.notMatch?.(fresh[0].reason || '', /coin we never bought/);
   assert.doesNotMatch(String(fresh[0].reason || ''), /coin we never bought/);
 });
+
+test('late-copy limit holds until sending: a buy decided in time but not sendable in time is not sent', async () => {
+  const { w, trader } = world();
+  const token = { address: MINT, symbol: 'MEME', decimals: 6, currentPriceUsd: 0.00002 };
+  // the limit ran out 1 s ago (detection + quote took too long): nothing goes out, cap released
+  const r = await trader.execute({ side: 'buy', token, amountUsd: 10, slippagePct: 10, deadlineAt: Date.now() - 1000 });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /too late to send/);
+  assert.equal(w.sent.length, 0);
+  assert.equal(trader.spent24hSol(), 0, 'daily-cap room given back');
+  // plenty of time left: the buy goes through
+  const ok = await trader.execute({ side: 'buy', token, amountUsd: 10, slippagePct: 10, deadlineAt: Date.now() + 60_000 });
+  assert.equal(ok.ok, true, ok.error);
+  // sells are never blocked by it
+  const s = await trader.execute({ side: 'sell', token, tokenAmount: 'all', slippagePct: null, deadlineAt: Date.now() - 1000 });
+  assert.equal(s.ok, true, s.error);
+});
+
+test('late-copy limit end-to-end: decided at 9.5 s (passes) but cannot land by 10 s → quiet skip, no alert, nothing sent', async () => {
+  const { w, trader } = world();
+  const { e, f } = engineFor(trader, { mode: 'buy-hold' });
+  const alertsBefore = e.alerts.length;
+  const r = await e.processTraderSignal({ ...buySig(f), ageSec: 9.5 });
+  assert.equal(r[0].status, 'skipped');
+  assert.match(r[0].reason, /too old to copy — too late to send/);
+  assert.equal(w.sent.length, 0);
+  assert.equal(e.alerts.filter((a) => /Real buy not executed/.test(a.title)).length, 0, 'no error alert');
+  assert.equal(e.alerts.length >= alertsBefore, true);
+  const ok = await e.processTraderSignal({ ...buySig(f), ageSec: 2 });
+  assert.equal(ok[0].status, 'filled', ok[0].reason);
+});
