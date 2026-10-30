@@ -5437,7 +5437,8 @@ a.diag.link{color:var(--purple,#a78bfa);text-decoration:none}
 .cfg-head{margin:4px 2px 16px}
 .cfg-head .card-title{font-size:20px}
 .cfg-layout{display:grid;grid-template-columns:230px minmax(0,1fr);gap:18px;align-items:start}
-.cfg-nav{position:sticky;top:80px;display:flex;flex-direction:column;gap:4px;padding:8px;border-radius:16px;background:var(--card);border:1px solid rgba(255,255,255,.05)}
+.cfg-side{position:sticky;top:80px;display:flex;flex-direction:column;gap:10px;min-width:0}
+.cfg-nav{display:flex;flex-direction:column;gap:4px;padding:8px;border-radius:16px;background:var(--card);border:1px solid rgba(255,255,255,.05)}
 .cfg-nav-btn{display:flex;align-items:center;gap:11px;width:100%;padding:10px;border:0;border-radius:11px;background:transparent;color:var(--text-dim);font:inherit;text-align:left;cursor:pointer}
 .cfg-nav-btn:hover{background:rgba(255,255,255,.03);color:var(--text)}
 .cfg-nav-btn.active{background:rgba(139,92,246,.12);color:var(--text)}
@@ -6914,3 +6915,11 @@ body.logged-out .dax-fab,body.logged-out .dax-chat{display:none!important}
 .bs-status.bad { border-color: rgba(239, 68, 68, 0.45); background: rgba(239, 68, 68, 0.08); }
 .bs-status.warn { border-color: rgba(234, 179, 8, 0.45); background: rgba(234, 179, 8, 0.08); }
 .bs-status a { color: inherit; text-decoration: underline; }
+
+/* Settings → Sign out, under the settings menu */
+.cfg-signout{display:flex;align-items:center;gap:12px;width:100%;padding:12px 14px;border-radius:16px;border:1px solid rgba(255,255,255,.05);background:var(--card);color:var(--text-dim);font:inherit;text-align:left;cursor:pointer;transition:color .15s,background .15s,border-color .15s}
+.cfg-signout .cfg-nav-txt strong{color:var(--text,#e4e4e7)}
+.cfg-signout:hover{color:#f87171;border-color:rgba(248,113,113,.35);background:rgba(248,113,113,.08)}
+.cfg-signout:hover .cfg-nav-txt strong{color:#f87171}
+body.logged-out .cfg-signout{display:none}
+@media (max-width:900px){.cfg-side{position:static}.cfg-signout .cfg-nav-txt small{display:none}}
