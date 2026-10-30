@@ -213,6 +213,9 @@ export class LiveSignalService {
       chainId: 'solana',
       side: sig.side,
       sellSharePct: sig.side === 'sell' ? (Number(sig.sellSharePct) > 0 ? Number(sig.sellSharePct) : 100) : undefined,
+      // a buy: how much of this coin the trader already held (> 0 = a top-up of an earlier buy)
+      traderHeldBefore: sig.side === 'buy' && Number.isFinite(Number(sig.heldBefore)) && sig.heldBefore !== null ? Number(sig.heldBefore) : undefined,
+      traderTokens: Number(sig.tokenAmount) || undefined,
       traderHandle: follow ? follow.handle : sig.label || sig.wallet,
       traderWallet: sig.wallet,
       signature: sig.signature,

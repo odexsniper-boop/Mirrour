@@ -228,6 +228,7 @@ export function parseSwapFromTransaction(tx, wallet) {
   return {
     side,
     sellSharePct: sellSharePct === null ? null : Number(sellSharePct.toFixed(2)),
+    heldBefore: before, // the wallet's balance of this coin before the trade (> 0 on a buy = a top-up)
     tokenMint: tok.mint,
     tokenDecimals: decimalsByMint.get(tok.mint) ?? (/pump$/i.test(tok.mint) ? 6 : null),
     tokenAmount: Math.abs(tok.delta),
@@ -1131,6 +1132,7 @@ export class SolanaWalletWatcher {
       name: info?.name || null,
       tokenAmount: swap.tokenAmount,
       sellSharePct: swap.sellSharePct,
+      heldBefore: Number.isFinite(swap.heldBefore) ? swap.heldBefore : null,
       quoteSymbol: swap.quoteSymbol,
       quoteAmount: swap.quoteAmount,
       usdValue,
@@ -1636,6 +1638,7 @@ export class SolanaWalletWatcher {
       name: info?.name || null,
       tokenAmount: swap.tokenAmount,
       sellSharePct: swap.sellSharePct ?? null,
+      heldBefore: Number.isFinite(swap.heldBefore) ? swap.heldBefore : Number.isFinite(swap.before) ? swap.before : null,
       quoteSymbol: swap.quoteSymbol,
       quoteAmount: swap.quoteAmount,
       usdValue: swap.usdValue ?? null,

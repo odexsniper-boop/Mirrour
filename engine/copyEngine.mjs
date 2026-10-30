@@ -606,6 +606,13 @@ export class CopyTradingEngine {
     }
 
     const traderBuyUsd = Number(signal.traderBuyUsd ?? 100);
+    // Top-up of a coin we never bought: the trader's first buy was missed (skipped, too late or not
+    // seen), so this later buy would be a late entry — after the copier wave, usually a loss. This
+    // applies even with "copy top-ups" on: top-ups only make sense on top of our first copy.
+    if (token.address && this.isTopUpOfMissedEntry(follow, signal)) {
+      if (!dryRun) this.markCopiedCycle(follow.id, token.address, 'missed');
+      return this.recordSkip({ dryRun, follow, wallet, signal, reason: 'trader is adding to a coin we never bought (their first buy was missed) — late entry skipped' });
+    }
     // Top-up of a coin we already copied in this trader position (they haven't fully sold yet)
     const copyTopUps = this.copyTopUpsFor(follow);
     if (!copyTopUps && token.address && this.copiedCycleActive(follow.id, token.address)) {
@@ -2115,6 +2122,29 @@ export class CopyTradingEngine {
    * Ends when the trader sells 100%, or after 2 h (in case their sell was never seen).
    */
   // kind '' = we copied this trader position; 'missed' = their entry came too late to copy
+  /**
+   * Is this buy a top-up of a position we never entered? Known from the trader's balance before
+   * the buy (from the transaction), or — when that is unknown — from our own log of their earlier
+   * buys of this coin since they last sold out.
+   */
+  isTopUpOfMissedEntry(follow, signal) {
+    const mint = signal.token?.address;
+    if (!mint) return false;
+    const haveCopy = this.positions.some((p) => p.followId === follow.id && p.tokenAddress === mint && p.remainingTokens > 0);
+    if (haveCopy) return false;
+    const before = Number(signal.traderHeldBefore);
+    if (signal.traderHeldBefore !== undefined && signal.traderHeldBefore !== null && Number.isFinite(before)) {
+      const bought = Number(signal.traderTokens) || 0;
+      // leftovers of an earlier round (dust under 5% of this buy) don't count
+      return before > 0 && (!bought || before >= bought * 0.05);
+    }
+    if (!follow.traderWallet || !Array.isArray(this.traderLog)) return false;
+    const since = Date.now() - 2 * 3600_000;
+    const log = this.traderLog.filter((e) => e.w === follow.traderWallet && e.mint === mint && e.t >= since && e.sig !== signal.signature);
+    const lastExit = log.filter((e) => e.side === 'sell' && Number(e.share) >= 99).reduce((m, e) => Math.max(m, e.t), 0);
+    return log.some((e) => e.side === 'buy' && e.t > lastExit);
+  }
+
   copiedCycleActive(followId, mint, kind = '') {
     const k = `${followId}:${mint}${kind ? `:${kind}` : ''}`;
     const c = this.copiedCycles?.[k];

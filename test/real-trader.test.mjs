@@ -832,3 +832,37 @@ test('trader-sold guard: a buy that reaches us after the trader already sold the
   const ok = await e.processTraderSignal({ ...buySig(f), ageSec: 2 });
   assert.equal(ok[0].status, 'filled', ok[0].reason);
 });
+
+test('missed-entry guard: a top-up of a coin we never bought is skipped, even with top-ups on (GOON, 30 Oct)', async () => {
+  const { trader } = world();
+  const { e, f } = engineFor(trader, { mode: 'buy-hold' }); // copyTopUps = true
+  // Decu already held 30M GOON (his first buy was missed); now he adds 2.4M
+  const topUp = await e.processTraderSignal({ ...buySig(f), ageSec: 1, traderHeldBefore: 30_000_000, traderTokens: 2_446_667 });
+  assert.equal(topUp[0].status, 'skipped');
+  assert.match(topUp[0].reason, /coin we never bought/);
+  // a first buy (held nothing before) is copied
+  const first = await e.processTraderSignal({ ...buySig(f), ageSec: 1, traderHeldBefore: 0, traderTokens: 54_000_000 });
+  assert.equal(first[0].status, 'filled', first[0].reason);
+  // now we hold a copy: his next top-up is a normal top-up (copied, top-ups on)
+  const next = await e.processTraderSignal({ ...buySig(f), ageSec: 1, traderHeldBefore: 54_000_000, traderTokens: 1_000_000 });
+  assert.equal(next[0].status, 'filled', next[0].reason);
+});
+
+test('missed-entry guard: dust left from an earlier round is not a top-up; unknown balance falls back to the trader log', async () => {
+  const { trader } = world();
+  const { e, f } = engineFor(trader, { mode: 'buy-hold' });
+  const dust = await e.processTraderSignal({ ...buySig(f), ageSec: 1, traderHeldBefore: 10, traderTokens: 5_000_000 });
+  assert.equal(dust[0].status, 'filled', dust[0].reason);
+  const g = engineFor(trader, { mode: 'buy-hold' });
+  // balance unknown (fast path), but our log saw his earlier buy of this coin and no full exit
+  g.e.traderLog = [{ t: Date.now() - 40_000, w: g.f.traderWallet, mint: MINT, side: 'buy', copies: [] }];
+  const r = await g.e.processTraderSignal({ ...buySig(g.f), ageSec: 1 });
+  assert.equal(r[0].status, 'skipped');
+  assert.match(r[0].reason, /coin we never bought/);
+  // after his full exit, a new buy is a fresh entry again
+  g.e.traderLog.push({ t: Date.now() - 20_000, w: g.f.traderWallet, mint: MINT, side: 'sell', share: 100, copies: [] });
+  g.e.copiedCycles = {};
+  const fresh = await g.e.processTraderSignal({ ...buySig(g.f), ageSec: 1 });
+  assert.notMatch?.(fresh[0].reason || '', /coin we never bought/);
+  assert.doesNotMatch(String(fresh[0].reason || ''), /coin we never bought/);
+});
