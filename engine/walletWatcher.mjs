@@ -975,16 +975,23 @@ export class SolanaWalletWatcher {
 
   /** RPC call; a 429 (rate limited) is retried a few times with growing pauses. Fast calls race fastRpcUrls. */
   async rpc(method, params, { fast = false, rpcUrl = this.rpcUrl } = {}) {
-    const altUrls = fast && rpcUrl === this.rpcUrl ? (this.fastRpcUrls || []).filter((u) => u && u !== this.rpcUrl) : [];
+    const altUrls = rpcUrl === this.rpcUrl ? (this.fastRpcUrls || []).filter((u) => u && u !== this.rpcUrl) : [];
     for (let attempt = 0; ; attempt++) {
       if (!fast) await this.throttle();
       try {
-        if (altUrls.length && attempt === 0) {
+        if (fast && altUrls.length && attempt === 0) {
           return await Promise.any([this.rpcOnce(method, params, rpcUrl), ...altUrls.map((u) => this.rpcOnce(method, params, u))]);
         }
         return await this.rpcOnce(method, params, rpcUrl);
       } catch (err) {
         const e = err instanceof AggregateError ? err.errors?.find((x) => x?.rateLimited) || err.errors?.[0] || err : err;
+        if (!fast && attempt === 0 && altUrls.length && !e.rateLimited && /unreachable|HTTP 5\d\d/i.test(e.message || '')) {
+          try {
+            return await this.rpcOnce(method, params, altUrls[0]);
+          } catch {
+            // keep original error handling below
+          }
+        }
         if (!e.rateLimited || attempt >= 3) throw e;
         await new Promise((r) => setTimeout(r, 500 * 2 ** attempt + Math.random() * 200));
       }
@@ -1170,6 +1177,7 @@ export class SolanaWalletWatcher {
     };
     this.emittedSigs.set(sig, swap.tokenMint);
     if (this.emittedSigs.size > 3000) this.emittedSigs = new Map([...this.emittedSigs].slice(-1500));
+    w.lastMoveAt = Date.now();
     this.status.signalsEmitted += 1;
     try {
       await this.onSignal(signal);
@@ -1572,7 +1580,17 @@ export class SolanaWalletWatcher {
         return [];
       }
     }
-    const out = await this.scanOwnTransactions(w, prev.lastSig, fast);
+    let out;
+    try {
+      out = await this.scanOwnTransactions(w, prev.lastSig, fast);
+    } catch (err) {
+      if ((prev.misses || 0) >= 1) {
+        w.flood = { sol: bal.sol, usdc: bal.usdc ?? prev.usdc, seenSol: bal.sol, seenUsdc: bal.usdc, lastSig: newest || prev.lastSig, misses: 0, at: Date.now() };
+      } else {
+        w.flood = { ...prev, seenSol: bal.sol, seenUsdc: bal.usdc, misses: (prev.misses || 0) + 1 };
+      }
+      throw err;
+    }
     if (out.length || (prev.misses || 0) >= 3) {
       if (!out.length) this.noteSkip(w, `bal-${Date.now()}`, 'balance changed but no trade signed by this wallet (transfer in/out)');
       w.flood = { sol: bal.sol, usdc: bal.usdc ?? prev.usdc, seenSol: bal.sol, seenUsdc: bal.usdc, lastSig: newest || prev.lastSig, misses: 0, at: Date.now() };

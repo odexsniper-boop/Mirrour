@@ -936,7 +936,7 @@ export const server = http.createServer(async (req, res) => {
         const rs = realTrader.status();
         add('real-key', 'Real trading wallet', rs.ready, rs.keyError || 'Paper Trading is OFF but no bot wallet key is set (ODEX_TRADER_KEY in .env), so nothing is copied');
         add('real-price', 'Live SOL price for real orders', solPriceLive, 'SOL price not loaded yet — real orders wait for it', 'warning');
-        const recentErr = rs.lastError && now - rs.lastError.at < 600_000;
+        const recentErr = rs.lastError && now - rs.lastError.at < 600_000 && !/price moved (too far|past the limit)/i.test(rs.lastError.error || '');
         add('real-errors', 'Real orders', !recentErr, recentErr ? redact(rs.lastError.error, alchemy.apiKey) : '', 'warning');
         if (rs.ready && rs.balance) add('real-gas', 'Bot wallet SOL for fees', rs.balance.sol >= rs.caps.reserveSol, `Only ${rs.balance.sol.toFixed(4)} SOL in the bot wallet — keep at least ${rs.caps.reserveSol} SOL for fees`, 'warning');
       }

@@ -973,7 +973,7 @@ export class RealTrader {
         release();
         if (side === 'sell') this.sellBlockedUntil.set(mint, this.now() + this.caps.sellRetrySec * 1000);
         this.record({ side, mint, symbol: token.symbol, signature: dr.signature || null, ok: false, route: 'direct', error: dr.error });
-        return this.fail(`price moved too far before we could copy — ${dr.error}`, { txHash: dr.signature || null });
+        return { ok: false, error: `price moved too far before we could copy — ${dr.error}`, paper: false, priceMoved: true, txHash: dr.signature || null };
       } else if (dr.unknown) {
         // sent but not confirmed: never fall back (that could buy twice) — check the wallet
         this.record({ side, mint, symbol: token.symbol, signature: dr.signature, ok: null, route: 'direct', error: dr.error });
