@@ -433,4 +433,44 @@ test('PD18 direct buy near maxChasePct ceiling tightens slippage locally without
   assert.equal(preSendCalls.filter((m) => m === 'getMultipleAccounts').length, 1, `no second directQuote RPC call when tightening slippage: ${preSendCalls.join(', ')}`);
 });
 
+test('PD19 direct buy blasts fastRpcUrls before awaiting primary sendTransaction, keeps blockhash warm, and polls status at 100 ms', async () => {
+  const { trader, token } = world();
+  const order = [];
+  const sleepIntervals = [];
+  const origSleep = trader.sleep;
+  trader.sleep = async (ms) => {
+    sleepIntervals.push(ms);
+    return origSleep(ms);
+  };
+  const origBlast = trader.blastSignedTransaction.bind(trader);
+  trader.blastSignedTransaction = (b64) => {
+    order.push('blast');
+    return origBlast(b64);
+  };
+  let statusCalls = 0;
+  const origRpc = trader.rpc;
+  trader.rpc = async (method, params) => {
+    if (method === 'sendTransaction') {
+      order.push('primary-send-start');
+      await Promise.resolve();
+      order.push('primary-send-end');
+    }
+    if (method === 'getSignatureStatuses') {
+      statusCalls += 1;
+      if (statusCalls === 1) return { value: [null] };
+    }
+    return origRpc(method, params);
+  };
+  trader.startBlockhashWarmer(60_000);
+  await trader.blockhashInFlight;
+  trader.stopBlockhashWarmer();
+  assert.ok(trader.blockhashCache?.hash, 'warmer pre-populated blockhashCache');
+  const q = await trader.quote({ side: 'buy', token, amountUsd: 10, slippagePct: 10 });
+  const r = await trader.execute({ side: 'buy', token, amountUsd: 10, quote: q, slippagePct: 10 });
+  assert.equal(r.ok, true, r.error);
+  assert.deepEqual(order.slice(0, 3), ['blast', 'primary-send-start', 'primary-send-end']);
+  assert.ok(sleepIntervals.includes(100), `expected 100ms status poll interval, got ${sleepIntervals.join(', ')}`);
+});
+
+
 

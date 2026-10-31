@@ -432,14 +432,51 @@ export class RealTrader {
     this.directStats.lastFallbackAt = this.now();
   }
 
+  async refreshBlockhash() {
+    if (this.blockhashInFlight) return this.blockhashInFlight;
+    this.blockhashInFlight = (async () => {
+      try {
+        const r = await this.rpc('getLatestBlockhash', [{ commitment: 'confirmed' }]);
+        const hash = r?.value?.blockhash || r?.blockhash;
+        if (!hash) throw new Error('no blockhash');
+        this.blockhashCache = { hash, at: this.now() };
+        return hash;
+      } finally {
+        this.blockhashInFlight = null;
+      }
+    })();
+    return this.blockhashInFlight;
+  }
+
   async recentBlockhash() {
     const c = this.blockhashCache;
-    if (c && this.now() - c.at < 20_000) return c.hash;
-    const r = await this.rpc('getLatestBlockhash', [{ commitment: 'confirmed' }]);
-    const hash = r?.value?.blockhash || r?.blockhash;
-    if (!hash) throw new Error('no blockhash');
-    this.blockhashCache = { hash, at: this.now() };
-    return hash;
+    if (c) {
+      const age = this.now() - c.at;
+      if (age < 30_000) {
+        if (age > 8_000) this.refreshBlockhash().catch(() => {});
+        return c.hash;
+      }
+    }
+    return this.refreshBlockhash();
+  }
+
+  /** Keep a fresh recentBlockhash in memory so direct pump.fun quotes never wait on getLatestBlockhash. */
+  startBlockhashWarmer(intervalMs = 10_000) {
+    if (this.blockhashTimer) return;
+    const tick = () => {
+      if (!this.ready() || this.routeSetting() !== 'direct') return;
+      this.refreshBlockhash().catch(() => {});
+    };
+    tick();
+    this.blockhashTimer = setInterval(tick, intervalMs);
+    this.blockhashTimer.unref?.();
+  }
+
+  stopBlockhashWarmer() {
+    if (this.blockhashTimer) {
+      clearInterval(this.blockhashTimer);
+      this.blockhashTimer = null;
+    }
   }
 
   /**
@@ -590,16 +627,16 @@ export class RealTrader {
     for (const [k, t] of this.sentSigs) if (this.now() - t > 120_000) this.sentSigs.delete(k);
     if (this.sentSigs.has(signed.signature)) return { fallback: true, error: 'identical transaction already sent — not sending it twice' };
     this.sentSigs.set(signed.signature, this.now());
-    // ----- send (main RPC + fast RPCs) and confirm -----
+    // ----- send (fast RPCs + main RPC in parallel) and confirm -----
     const sendStart = this.now();
     let sig = signed.signature;
+    this.blastSignedTransaction(signed.base64);
     try {
       const r = await this.rpc('sendTransaction', [signed.base64, { encoding: 'base64', skipPreflight: true, maxRetries: 3 }]);
       if (typeof r === 'string') sig = r;
     } catch (err) {
-      // the fast RPCs below still get it; the status check decides
+      // the fast RPCs above still got it; the status check decides
     }
-    this.blastSignedTransaction(signed.base64);
     const st = await this.waitForSignature(sig, 25_000);
     const sendMs = this.now() - sendStart;
     if (st === 'unknown') return { unknown: true, signature: sig, error: 'sent but not confirmed in 25 s' };
@@ -688,13 +725,13 @@ export class RealTrader {
       if (dryRun) return { ok: true, dryRun: true, sentSol, feeSol: Number(have - fromAfter - lamports) / 1e9, to: dest };
       // ----- send + confirm -----
       let sig = signed.signature;
+      this.blastSignedTransaction(signed.base64);
       try {
         const r = await this.rpc('sendTransaction', [signed.base64, { encoding: 'base64', skipPreflight: true, maxRetries: 5 }]);
         if (typeof r === 'string') sig = r;
       } catch {
         // the status check decides
       }
-      this.blastSignedTransaction(signed.base64);
       const st = await this.waitForSignature(sig, 30_000);
       this.record({ side: 'transfer', mint: null, symbol: 'SOL', signature: sig, ok: st === 'success' ? true : st === 'failed' ? false : null, route: 'transfer', to: dest, sol: sentSol, error: st === 'success' ? null : st === 'failed' ? 'transfer failed on-chain' : 'not confirmed in 30 s' });
       const balance = await this.refreshBalance().catch(() => this.balance);
@@ -1139,7 +1176,7 @@ export class RealTrader {
       } catch {
         // keep trying
       }
-      await this.sleep(250);
+      await this.sleep(100);
     }
     return 'unknown';
   }

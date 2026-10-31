@@ -138,6 +138,7 @@ realTrader.routeSetting = () => (process.env.ODEX_SWAP_ROUTE === 'jupiter' ? 'ju
 // ODEX_FAST_DETECT=off on Railway turns it off whatever the setting says (emergency switch).
 liveSignals.watcher.fastDetect = () => process.env.ODEX_FAST_DETECT !== 'off' && engine.settings.fastDetect === true;
 realTrader.priorityMicroLamports = () => Number(process.env.ODEX_DIRECT_PRIORITY_MICROLAMPORTS || 100_000);
+realTrader.startBlockhashWarmer();
 
 engine.adapter.liveHooks = realTrader.hooks();
 
@@ -2245,6 +2246,7 @@ function shutdown(signal) {
   shuttingDown = true;
   shuttingDownFlag = true; // stop exits and lock refreshes right away
   liveSignals.watcher.stop();
+  realTrader.stopBlockhashWarmer();
   // free the one-bot-at-a-time lock so another copy can take over right away
   if (supabase.enabled && !otherInstance) supabase.push([['instance_lock', { id: INSTANCE_ID, host: 'stopped', at: 0 }]]).catch(() => {});
   const done = () => process.exit(0);
