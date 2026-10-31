@@ -19,7 +19,7 @@ export function isPumpFunCoin(swap) {
   return Boolean(swap && /pump$/.test(String(swap.tokenMint || '')) && (swap.venue === 'pumpfun' || swap.venue === 'pumpswap'));
 }
 import { bondingCurvePda } from './pumpCurve.mjs';
-import { pumpTradeFromLogs, swapFromPumpTrade } from './pumpLogs.mjs';
+import { pumpTradeFromLogs, swapFromPumpTrade, FAST_TRADE_PROGRAMS } from './pumpLogs.mjs';
 import { YellowstoneFeed } from './yellowstone.mjs';
 import { findProgramAddress, base58Decode as b58d } from './onchainMeta.mjs';
 const ASSOCIATED_TOKEN_PROGRAM = 'ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL';
@@ -475,7 +475,7 @@ export class SolanaWalletWatcher {
     this.maxRps = Number(process.env.ODEX_RPC_MAX_RPS || 15);
     // Token details (name, logo, market data) may wait this long before a trade is passed on
     // for copying; whatever arrives later is filled in afterwards (onTokenInfoLate)
-    this.tokenInfoBudgetMs = Number(process.env.ODEX_TOKEN_INFO_BUDGET_MS ?? 1200);
+    this.tokenInfoBudgetMs = Number(process.env.ODEX_TOKEN_INFO_BUDGET_MS ?? 50);
     this.pumpInfoBudgetMs = Number(process.env.ODEX_PUMP_INFO_BUDGET_MS ?? 25);
     this.onTokenInfoLate = null;
     this.rpcTimes = [];
@@ -705,7 +705,12 @@ export class SolanaWalletWatcher {
       return;
     }
     this.streamStats.swapsSeen += 1;
-    if (this.fastDetect() && Array.isArray(ev.logs) && ev.logs.some((l) => String(l).includes('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P'))) {
+    const hasFastLogsProgram = Array.isArray(ev.logs) && ev.logs.some((l) => {
+      const s = String(l);
+      for (const p of FAST_TRADE_PROGRAMS) if (s.includes(p)) return true;
+      return false;
+    });
+    if (this.fastDetect() && hasFastLogsProgram) {
       const r = pumpTradeFromLogs(ev.logs, address, { err: ev.err });
       if (r.trade) {
         this.fastTrade(w, ev, r.trade);

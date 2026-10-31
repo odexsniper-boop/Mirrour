@@ -15,6 +15,9 @@
 import { base58Encode } from './onchainMeta.mjs';
 
 export const PUMP_PROGRAM = '6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P';
+export const PUMP_AMM_PROGRAM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+export const RAYDIUM_LAUNCHLAB_PROGRAM = 'LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj';
+export const FAST_TRADE_PROGRAMS = new Set([PUMP_PROGRAM, PUMP_AMM_PROGRAM, RAYDIUM_LAUNCHLAB_PROGRAM]);
 const WSOL_MINT = 'So11111111111111111111111111111111111111112';
 const ZERO_KEY = '11111111111111111111111111111111';
 const TRADE_EVENT = Buffer.from([189, 219, 127, 211, 78, 230, 97, 238]);
@@ -172,8 +175,9 @@ export function pumpTradeFromLogs(logs, trader, { err = null } = {}) {
     const isTrade = disc.equals(TRADE_EVENT);
     const isComplete = disc.equals(COMPLETE_EVENT) || disc.equals(POST_COMPLETE_BUY_EVENT);
     if (!isTrade && !isComplete) continue;
-    // the core check: only pump.fun itself can write a trusted event
-    if (stack[stack.length - 1] !== PUMP_PROGRAM) {
+    // the core check: only pump.fun itself or trusted migration programs can write a trusted event
+    const activeProg = stack[stack.length - 1];
+    if (!FAST_TRADE_PROGRAMS.has(activeProg)) {
       if (isTrade) return { skip: 'trade record written by another program (ignored)', forged: true };
       continue;
     }
@@ -184,6 +188,7 @@ export function pumpTradeFromLogs(logs, trader, { err = null } = {}) {
     let ev;
     try {
       ev = decodeTradeEvent(data.subarray(8));
+      ev.program = activeProg;
     } catch {
       return { skip: 'trade record unreadable' };
     }
@@ -232,7 +237,7 @@ export function swapFromPumpTrade(t, { signature, slot = null, heldAfterRaw = nu
     slot,
     // the event's own timestamp is the block's clock (seconds); the push time is more exact
     blockTime: Number(t.timestamp) > 0 ? Math.min(receivedAt, Number(t.timestamp) * 1000) : receivedAt,
-    venue: 'pumpfun',
+    venue: t.program && t.program !== PUMP_PROGRAM ? 'pumpswap' : 'pumpfun',
     fastDetect: true,
     curve: { virtualSolReserves: t.virtualSolReserves, virtualTokenReserves: t.virtualTokenReserves, realTokenReserves: t.realTokenReserves },
   };

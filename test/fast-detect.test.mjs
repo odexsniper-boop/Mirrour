@@ -4,7 +4,7 @@ process.env.ODEX_RPC_MAX_RPS = '0';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { pumpTradeFromLogs, swapFromPumpTrade, decodeTradeEvent, PUMP_PROGRAM } from '../engine/pumpLogs.mjs';
+import { pumpTradeFromLogs, swapFromPumpTrade, decodeTradeEvent, PUMP_PROGRAM, RAYDIUM_LAUNCHLAB_PROGRAM } from '../engine/pumpLogs.mjs';
 import { SolanaWalletWatcher } from '../engine/walletWatcher.mjs';
 import { base58Encode, base58Decode, findProgramAddress } from '../engine/onchainMeta.mjs';
 import { CopyTradingEngine } from '../engine/copyEngine.mjs';
@@ -312,3 +312,24 @@ test('Yellowstone gRPC feed plugs into fast detection; the first feed to hear a 
   assert.equal(w.getStatus().stream.grpcFeed.kind, 'yellowstone-grpc');
   assert.doesNotMatch(JSON.stringify(w.getStatus().stream.grpcFeed), /api-key=k/, 'key not shown in status');
 });
+
+test('FD14 a trade through Raydium LaunchLab (PumpSwap) is decoded via fast-logs with venue pumpswap', () => {
+  const eventB64 = tradeEvent();
+  const launchlabLogs = [
+    'Program ComputeBudget111111111111111111111111111111 invoke [1]',
+    'Program ComputeBudget111111111111111111111111111111 success',
+    'Program FLASHX8DrLbgeR8FcfNV1F5krxYcYMUdBkrP1EPBtxB9 invoke [1]',
+    `Program ${RAYDIUM_LAUNCHLAB_PROGRAM} invoke [2]`,
+    'Program log: Instruction: BuyExactIn',
+    `Program data: ${eventB64}`,
+    `Program ${RAYDIUM_LAUNCHLAB_PROGRAM} consumed 25000 of 150000 compute units`,
+    `Program ${RAYDIUM_LAUNCHLAB_PROGRAM} success`,
+    'Program FLASHX8DrLbgeR8FcfNV1F5krxYcYMUdBkrP1EPBtxB9 success',
+  ];
+  const r = pumpTradeFromLogs(launchlabLogs, TRADER);
+  assert.ok(r.trade, r.skip);
+  const s = swapFromPumpTrade(r.trade);
+  assert.equal(s.venue, 'pumpswap');
+  assert.equal(s.side, 'buy');
+});
+
